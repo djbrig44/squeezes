@@ -31,7 +31,7 @@ from datetime import datetime, date
 # Import the scanner - adjust path as needed
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from weekend_squeeze_scanner import (
-    get_sp500_symbols,
+    get_default_tickers,
     scan_for_squeeze_fires,
     calculate_sunday_score,
 )
@@ -223,9 +223,8 @@ def run_scan_and_email(dry_run: bool = False, tickers: list = None):
         symbols = tickers
         print(f"📊 Scanning {len(symbols)} custom tickers...")
     else:
-        print("📊 Fetching S&P 500 tickers...")
-        symbols = get_sp500_symbols()
-        print(f"   Found {len(symbols)} tickers")
+        print("📊 Loading default trading universe...")
+        symbols = get_default_tickers()
 
     # Run scanner
     print("\n🔍 Running squeeze analysis...")
