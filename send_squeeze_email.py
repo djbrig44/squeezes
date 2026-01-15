@@ -154,12 +154,7 @@ def send_email(subject: str, html_body: str, dry_run: bool = False) -> bool:
     """
     gmail_user = os.environ.get('GMAIL_USER')
     gmail_password = os.environ.get('GMAIL_APP_PASSWORD')
-    recipient = os.environ.get('EMAIL_RECIPIENT', gmail_user)
-
-    # Debug: show what we got (mask password)
-    print(f"   DEBUG: GMAIL_USER={'set' if gmail_user else 'NOT SET'}")
-    print(f"   DEBUG: GMAIL_APP_PASSWORD={'set' if gmail_password else 'NOT SET'}")
-    print(f"   DEBUG: EMAIL_RECIPIENT={recipient or 'NOT SET'}")
+    recipient = os.environ.get('EMAIL_RECIPIENT') or gmail_user  # Fallback to sender if not set
 
     if not gmail_user or not gmail_password:
         print("❌ Error: GMAIL_USER and GMAIL_APP_PASSWORD environment variables required")
