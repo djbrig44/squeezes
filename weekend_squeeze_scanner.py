@@ -66,8 +66,8 @@ warnings.filterwarnings('ignore')
 # AIRTABLE CONFIGURATION
 # ============================================================================
 
-AT_BASE = os.getenv("AT_BASE", "appIUFp3KFrf8KXez")
-AT_API = os.getenv("AT_API", "")  # Set via environment variable
+AT_BASE = "appIUFp3KFrf8KXez"
+AT_API = os.getenv("AT_API", "")  # Set via GitHub Actions secret
 AT_TABLE = "Squeeze Signals"
 
 # HTTP session with retry strategy
@@ -207,8 +207,8 @@ def push_squeeze_signals_to_airtable(
         if 'sunday_score' not in stock:
             stock['sunday_score'] = calculate_sunday_score(stock)
 
-        # Use sector from scan phase (avoids extra API calls)
-        sector = stock.get('sector', 'Unknown')
+        # Get sector (cached if possible)
+        sector = get_sector(sym)
 
         # Build fields matching Swing System structure
         fields = {
@@ -291,268 +291,174 @@ def _process_airtable_batch(batch: List[Dict], method: str):
 # UNIVERSE DEFINITIONS
 # ============================================================================
 
+def get_sp500_symbols() -> List[str]:
+    """Fetch S&P 500 symbols from Wikipedia."""
+    try:
+        url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+        tables = pd.read_html(url)
+        df = tables[0]
+        symbols = df['Symbol'].str.replace('.', '-', regex=False).tolist()
+        return symbols
+    except Exception as e:
+        print(f"⚠️ Could not fetch S&P 500 list: {e}")
+        return []
+
 def clean_ticker_list(tickers: List[str]) -> List[str]:
     """Remove duplicates and validate tickers."""
     # Remove duplicates (case-insensitive)
     unique_tickers = list(set([t.upper() for t in tickers]))
-
+    
     # Filter out obvious non-standard symbols
     valid_pattern = re.compile(r'^[A-Z]{1,5}(\.[A-Z]{1,2})?$')
     cleaned = [t for t in unique_tickers if valid_pattern.match(t)]
-
+    
     # Sort alphabetically
     cleaned.sort()
-
+    
     print(f"📊 Ticker list: {len(tickers)} → {len(cleaned)} symbols")
     return cleaned
 
-
-# =========================================================================
-# MERGED TRADING UNIVERSE
-# Includes: Core watchlist + Russell 2000 + S&P 600 + Speculative picks
-# Total: ~1600 unique tickers after deduplication
-# =========================================================================
-
-DEFAULT_TICKERS = [
-    # =========================================================================
-    # RUSSELL 2000 SCREENER - $1-$20, 500k+ volume (317 stocks)
-    # =========================================================================
-    'FATE', 'HUMA', 'IPSC', 'NRDY', 'FCUV', 'HAIN', 'CDLX', 'BRCC', 'LXRX', 'QSI',
-    'HRTX', 'OPK', 'ZNTL', 'AMTX', 'SLQT', 'GERN', 'ALLO', 'URG', 'SABR', 'OCGN',
-    'ALEC', 'GPRO', 'SPWR', 'WTI', 'CRBU', 'SVC', 'PACB', 'DDD', 'OTLK', 'PLBY',
-    'CNDT', 'ALIT', 'HYLN', 'EGHT', 'CERS', 'AIRS', 'GEVO', 'CCCC', 'IBRX', 'EDIT',
-    'CLNE', 'SAVA', 'LIDR', 'RC', 'CCO', 'INO', 'TMCI', 'JELD', 'XRX', 'CLOV',
-    'FUBO', 'HNST', 'OMI', 'IOVA', 'NNOX', 'BDN', 'MVST', 'ASPN', 'RBBN', 'ALTO',
-    'BLND', 'EVGO', 'SPCE', 'IRWD', 'CYH', 'GOSS', 'LWLG', 'AGEN', 'OM', 'VUZI',
-    'NAT', 'EGY', 'RCKT', 'ERAS', 'FNKO', 'BMBL', 'ABSI', 'ABCL', 'TOI', 'AVXL',
-    'TTSH', 'RPAY', 'INDI', 'STKL', 'FOSL', 'BFLY', 'BORR', 'ESPR', 'EVH', 'ZIP',
-    'PGEN', 'RXRX', 'HPK', 'DNUT', 'TROX', 'SANA', 'SLDP', 'AMPY', 'BGS', 'GOGO',
-    'PTLO', 'ULCC', 'ABUS', 'MQ', 'NRGV', 'CODI', 'GTN', 'STGW', 'VERI', 'TLS',
-    'SFIX', 'APPS', 'GAMB', 'BW', 'ORGO', 'NEXT', 'RES', 'RWT', 'PAYO', 'MNKD',
-    'PTEN', 'UDMY', 'VIR', 'AIV', 'SENS', 'THRY', 'CRSR', 'DENN', 'DC', 'TDUP',
-    'HLX', 'AXL', 'ESRT', 'MYGN', 'SITC', 'AHH', 'EVLV', 'JBI', 'BLMN', 'EOLS',
-    'MDXG', 'SG', 'CFFN', 'UNIT', 'VNDA', 'LFST', 'NEOG', 'RDW', 'WEAV', 'SXC',
-    'ORC', 'XERS', 'NABL', 'COUR', 'LILAK', 'BCRX', 'ENVX', 'RLJ', 'SPIR', 'DBI',
-    'SFL', 'ACHR', 'FDMT', 'ABR', 'YEXT', 'CRGY', 'ACVA', 'FCEL', 'ONDS', 'KREF',
-    'SNBR', 'RLAY', 'GNL', 'AVAH', 'IVR', 'TNGX', 'GT', 'KODK', 'TRTX', 'PRCH',
-    'PCT', 'HLMN', 'SHO', 'GNW', 'DRH', 'TK', 'SHLS', 'PUMP', 'TTI', 'NUVB',
-    'EXPI', 'NTLA', 'DAWN', 'MARA', 'MFA', 'GPRE', 'ARI', 'HLIT', 'REPL', 'ECVT',
-    'LZ', 'CWH', 'NG', 'ARRY', 'FSLY', 'AHCO', 'CGEM', 'FBRT', 'UTZ', 'BKKT',
-    'COMP', 'KURA', 'PBI', 'TWO', 'BKD', 'TALO', 'CLSK', 'RXST', 'BHVN', 'HOPE',
-    'PEB', 'WULF', 'FIGS', 'AMPL', 'VLY', 'APLE', 'UEC', 'DHT', 'NEO', 'AMLX',
-    'EBS', 'PMT', 'HTBK', 'OCUL', 'AMRX', 'PD', 'AEVA', 'HLF', 'RIOT', 'DNOW',
-    'AVPT', 'ASAN', 'EFC', 'DX', 'JOBY', 'DBRG', 'AI', 'HOUS', 'ARLO', 'RELY',
-    'JANX', 'FOLD', 'FLYW', 'UUUU', 'SEM', 'STNE', 'SMR', 'OSCR', 'OI', 'SBH',
-    'VSH', 'KALV', 'CIFR', 'AXTI', 'DVAX', 'SGRY', 'FWRG', 'AMN', 'DOC', 'REAL',
-    'GEO', 'PLAY', 'MGNI', 'CWK', 'ADPT', 'DNLI', 'EXTR', 'HR', 'PHR', 'NN',
-    'IRDM', 'GLUE', 'BNL', 'IRT', 'ARR', 'NTST', 'MXL', 'METC', 'WWW', 'GRPN',
-    'SCVL', 'SONO', 'SKYT', 'VIAV', 'COMM', 'EYPT', 'LBRT', 'SM', 'ALHC', 'SBRA',
-    'EBC', 'MAC', 'CDE', 'CXW', 'SFNC', 'ADMA', 'NRIX', 'UE', 'PL', 'TGNA',
-    'RSI', 'ADNT', 'CVBF', 'LC', 'BANC', 'BXMT', 'SMPL',
-
-    # =========================================================================
-    # S&P 600 SCREENER - $1-$20, 500k+ volume (116 stocks)
-    # =========================================================================
-    'SABR', 'RC', 'BDN', 'NWL', 'GOGO', 'JBLU', 'MPW', 'HTZ', 'RES', 'RWT',
-    'PAYO', 'MCW', 'PTEN', 'VIR', 'THRY', 'CRSR', 'HLX', 'AXL', 'HBI', 'MYGN',
-    'SITC', 'VSTS', 'AHH', 'BLMN', 'CFFN', 'UNIT', 'NEOG', 'OGN', 'SXC', 'NABL',
-    'LUMN', 'CXM', 'ABR', 'CRGY', 'WEN', 'KREF', 'GNL', 'CERT', 'BGC', 'SHO',
-    'GNW', 'DRH', 'WU', 'AESI', 'EXPI', 'MARA', 'ARI', 'HLIT', 'AHCO', 'GO',
-    'FBRT', 'VYX', 'PBI', 'TWO', 'TALO', 'CLSK', 'LEG', 'DEI', 'HOPE', 'MBC',
-    'PEB', 'DV', 'MODG', 'APLE', 'CC', 'NEO', 'WT', 'PMT', 'IART', 'RXO',
-    'FMC', 'DNOW', 'EFC', 'TRIP', 'ARLO', 'ACHC', 'SEM', 'FUN', 'OI', 'SBH',
-    'VSH', 'DXC', 'PENN', 'DVAX', 'HAYW', 'AMN', 'GEO', 'PLAY', 'CWK', 'EXTR',
-    'ADEA', 'FTRE', 'ARR', 'ELME', 'MXL', 'VTLE', 'NVRI', 'WWW', 'SCVL', 'SONO',
-    'VIAV', 'LBRT', 'SM', 'MAC', 'CXW', 'SFNC', 'ADMA', 'UE', 'TGNA', 'ADNT',
-    'CVBF', 'MDU', 'BANC', 'WSC', 'BXMT', 'SMPL',
-
-    # =========================================================================
-    # SPECULATIVE PICKS - Drones, AI, Batteries, Mining, Space (21 stocks)
-    # =========================================================================
-
-    # Drones/Defense
-    'ONDS',   # Ondas Holdings - Counter-UAS, Iron Drone Raider
-    'RCAT',   # Red Cat Holdings - Black Widow drones, Palantir partnership
-    'DPRO',   # Draganfly - Heavy-lift drones, emergency response
-    'SPAI',   # Safe Pro Group - AI demining, threat detection
-
-    # Space
-    'RDW',    # Redwire - Space infrastructure, solar arrays
-
-    # Mining/Critical Minerals
-    'TMC',    # The Metals Company - Deep-sea mining nickel/cobalt
-    'NAK',    # Northern Dynasty - Pebble Mine copper/gold
-
-    # Real Estate Tech
-    'OPEN',   # Opendoor - AI-powered iBuying platform
-
-    # Crypto/Energy
-    'WULF',   # TeraWulf - Nuclear-powered Bitcoin mining
-
-    # Batteries/EV
-    'ENVX',   # Enovix - Next-gen silicon batteries
-    'EOSE',   # Eos Energy - Grid-scale battery storage
-    'QS',     # QuantumScape - Solid-state EV batteries
-    'ABAT',   # American Battery Tech - Lithium recycling
-
-    # eVTOL/Aviation
-    'ACHR',   # Archer Aviation - Air taxis, LA Olympics 2028
-
-    # AI Security
-    'EVLV',   # Evolv Technologies - AI weapons detection
-
-    # IoT/Fleet Tech
-    'AIOT',   # PowerFleet - Connected vehicle management
-    'LTRX',   # Lantronix - Edge computing, industrial IoT
-
-    # AI Software/Semiconductors
-    'POET',   # POET Technologies - Optical interposers for AI
-    'VERI',   # Veritone - AI-powered media platform
-
-    # AI/Defense
-    'BBAI',   # BigBear.ai - Government AI analytics
-
-    # Energy Infrastructure
-    'WTTR',   # Select Water Solutions - Permian Basin water mgmt
-
-    # =========================================================================
-    # CORE UNIVERSE - Major caps and ETFs
-    # =========================================================================
-    'A', 'AAPL', 'AAUC', 'AAUKF', 'ABBRF', 'ABBV', 'ABCB', 'ABEV', 'ABNB', 'ABT',
-    'ABZPY', 'ACAD', 'ACCMF', 'ACGL', 'ACN', 'ACTU', 'ADBE', 'ADI', 'ADM',
-    'ADP', 'ADSK', 'ADTX', 'AEE', 'AEG', 'AEHL', 'AEM', 'AEP', 'AES',
-    'AFBOF', 'AFL', 'AG', 'AGI', 'AGMH', 'AGRI', 'AGRZ', 'AIG',
-    'AIR', 'AIRO', 'AIZ', 'AJG', 'AKAM', 'AL', 'ALAB', 'ALB', 'ALE', 'ALEX',
-    'ALGN', 'ALL', 'ALLE', 'ALLR', 'ALLY', 'ALM', 'ALV', 'AM', 'AMAT',
-    'AMBP', 'AMC', 'AMCR', 'AMD', 'AME', 'AMGN', 'AMKR', 'AMP', 'AMRK',
-    'AMRRY', 'AMT', 'AMTM', 'AMVMF', 'AMZN', 'ANET', 'ANF', 'AON', 'AOS', 'APA',
-    'APD', 'APH', 'APO', 'APP', 'APTV', 'APUS', 'APVO', 'AQB', 'AQMS', 'ARE',
-    'ARM', 'ARMN', 'ARTV', 'ARWR', 'ASH', 'ASLE', 'ASM', 'ASML', 'ASND',
-    'ASNS', 'ASTL', 'ASTS', 'ASX', 'ATAT', 'ATEC', 'ATI', 'ATMU', 'ATMV',
-    'ATO', 'ATRC', 'ATRO', 'ATROB', 'ATUSF', 'AU', 'AUPH', 'AUR', 'AUTL', 'AVA',
-    'AVAV', 'AVB', 'AVGO', 'AVNBF', 'AVVOF', 'AVVSY', 'AVY', 'AWK', 'AXON', 'AXP',
-    'AXS', 'AXSM', 'AZ', 'AZN', 'AZO', 'B', 'BA', 'BABA', 'BAC', 'BAESY',
-    'BALL', 'BAX', 'BBIO', 'BBVA', 'BBWI', 'BBY', 'BCCC', 'BCKIF',
-    'BCKIY', 'BCS', 'BDNNY', 'BDRAF', 'BDRBF', 'BDRPF', 'BDRXF', 'BDSX', 'BDX', 'BEN',
-    'BEP', 'BEPC', 'BETA', 'BF-B', 'BG', 'BHC', 'BHP', 'BHPLF', 'BIIB', 'BIOA',
-    'BIPC', 'BITF', 'BITO', 'BK', 'BKCH', 'BKE', 'BKH', 'BKNG', 'BKR', 'BKU',
-    'BLBX', 'BLDR', 'BLIDF', 'BLK', 'BLNE', 'BLSH', 'BMNR', 'BMO', 'BMY', 'BN',
-    'BNPQY', 'BNS', 'BOLD', 'BOMBF', 'BP', 'BPOP', 'BR', 'BRAG', 'BRELY',
-    'BRK-B', 'BRN', 'BRO', 'BRSGF', 'BRSL', 'BSX', 'BTAI', 'BTBD', 'BTC', 'BTDR',
-    'BTG', 'BTI', 'BTM', 'BURU', 'BVN', 'BWA', 'BWAY', 'BWXT', 'BX',
-    'BXP', 'BYD', 'BYRN', 'C', 'CADE', 'CAE', 'CAG', 'CAH', 'CAI', 'CAL',
-    'CAN', 'CAPR', 'CAPS', 'CARR', 'CAT', 'CAVA', 'CB', 'CBOE', 'CBRE',
-    'CCCX', 'CCEP', 'CCHH', 'CCI', 'CCJ', 'CCL', 'CDNS', 'CDRE', 'CDW',
-    'CEG', 'CELH', 'CEPU', 'CETX', 'CF', 'CFG', 'CFRUY', 'CG', 'CHA', 'CHAI',
-    'CHD', 'CHRS', 'CHRW', 'CHTR', 'CHWY', 'CHYM', 'CI', 'CINF', 'CL',
-    'CLF', 'CLFD', 'CLRO', 'CLS', 'CLVT', 'CLX', 'CM', 'CMA', 'CMBT',
-    'CMCLY', 'CMCSA', 'CMCT', 'CME', 'CMGMF', 'CMGMY', 'CMP', 'CMPX', 'CMS', 'CNC',
-    'CNH', 'CNL', 'CNO', 'CNP', 'CNTY', 'COCO', 'COEP', 'COF', 'COHR', 'COHTF',
-    'COIN', 'COKE', 'COLL', 'CONL', 'COO', 'COOT', 'COP', 'COR', 'COST', 'CPAY',
-    'CPB', 'CPRT', 'CPT', 'CPWPF', 'CPXWF', 'CRBG', 'CRCL', 'CRDO', 'CRIS', 'CRL',
-    'CRM', 'CRML', 'CRPJY', 'CRRSF', 'CRWD', 'CRWV', 'CSCO', 'CSGP', 'CSGS',
-    'CSIQ', 'CSX', 'CTAS', 'CTGO', 'CTRA', 'CTRE', 'CTSH', 'CTVA', 'CUK', 'CVE',
-    'CVI', 'CVS', 'CVX', 'CWEN', 'CWEN-A', 'D', 'DAL', 'DASH', 'DAY', 'DB',
-    'DBOEY', 'DCO', 'DD', 'DDOG', 'DE', 'DECK', 'DEFT', 'DELL', 'DEO', 'DEVS',
-    'DG', 'DGX', 'DHI', 'DHR', 'DINO', 'DIS', 'DJT', 'DLR', 'DLTR', 'DLXY',
-    'DNN', 'DOV', 'DOW', 'DPZ', 'DRI', 'DRS', 'DRUG', 'DTE',
-    'DTIL', 'DTM', 'DUAVF', 'DUK', 'DVA', 'DVN', 'DVS', 'DWMNF', 'DXCM',
-    'DXF', 'EA', 'EADSF', 'EADSY', 'EBAY', 'ECL', 'ECX', 'ED', 'EDRWY', 'EFX',
-    'EG', 'EGO', 'EH', 'EHMEF', 'EIX', 'EJH', 'EKSO', 'EL', 'ELF',
-    'ELV', 'ELVR', 'EMBJ', 'EME', 'EMMS', 'EMR', 'ENB', 'ENSG', 'ENTO', 'EPAM',
-    'EPD', 'EPWDF', 'EQIX', 'EQNR', 'EQR', 'EQT', 'ERDCF', 'ERIE', 'ERMAF', 'ERMAY',
-    'ERO', 'ES', 'ESNT', 'ESS', 'ETHM', 'ETN', 'ETR', 'EVAX', 'EVEX', 'EVRG',
-    'EVTL', 'EW', 'EWBC', 'EXALF', 'EXAS', 'EXC', 'EXE', 'EXEL', 'EXK', 'EXPD',
-    'EXPE', 'EXR', 'EYE', 'EYUBY', 'F', 'FANG', 'FAST', 'FBYD', 'FCX', 'FDS',
-    'FDX', 'FE', 'FFIV', 'FGI', 'FHI', 'FHN', 'FIEE', 'FINMF', 'FINMY',
-    'FIS', 'FITB', 'FIX', 'FLNC', 'FLR', 'FLY', 'FMCC', 'FMX', 'FNB', 'FNV',
-    'FOFO', 'FORD', 'FOUR', 'FOX', 'FOXA', 'FRMI', 'FRO', 'FRT', 'FSLR', 'FSM',
-    'FTNT', 'FTS', 'FTV', 'FWRD', 'GAUZ', 'GCTK', 'GD', 'GDDY', 'GDIV', 'GE',
-    'GEHC', 'GEN', 'GENI', 'GEOS', 'GEV', 'GFAI', 'GFI', 'GFS', 'GIBO',
-    'GIL', 'GILD', 'GIS', 'GL', 'GLD', 'GLNCY', 'GLW', 'GM', 'GMAB', 'GME',
-    'GNRC', 'GOLD', 'GOOG', 'GOOGL', 'GOTU', 'GPC', 'GPK', 'GPN', 'GRMN', 'GRRR',
-    'GS', 'GSAT', 'GSK', 'GTX', 'GVA', 'GWAV', 'GWW', 'HAGHY', 'HAL', 'HAO',
-    'HAS', 'HASI', 'HBAN', 'HBM', 'HCA', 'HCWB', 'HD', 'HEI', 'HELE', 'HG',
-    'HHS', 'HIG', 'HII', 'HIMS', 'HL', 'HLT', 'HMY', 'HNRG', 'HNSDF',
-    'HOLO', 'HOLX', 'HON', 'HOOD', 'HOVR', 'HP', 'HPE', 'HPIFY', 'HPQ', 'HRL',
-    'HSIC', 'HST', 'HSY', 'HUBB', 'HUM', 'HUN', 'HUT', 'HWM', 'HXL', 'HYFT',
-    'HYMC', 'HYPD', 'IAG', 'IBG', 'IBM', 'ICE', 'IDA', 'IDEXY', 'IDR',
-    'IDXX', 'IE', 'IEX', 'IFF', 'ILKAY', 'IMNN', 'IMO', 'IMSR', 'INCY', 'INDV',
-    'ING', 'INMB', 'INSM', 'INSP', 'INSW', 'INTC', 'INTR', 'INTT', 'INTU', 'INUV',
-    'INVH', 'IONQ', 'IONS', 'IOT', 'IOTR', 'IP', 'IPG', 'IPX', 'IQV', 'IR',
-    'IRBT', 'IREN', 'IRM', 'IRTC', 'ISRG', 'ISSC', 'IT', 'ITRG', 'ITUB', 'ITW',
-    'IVDA', 'IVF', 'IVPAF', 'IVVD', 'IVZ', 'IWM', 'J', 'JAGX', 'JBDI', 'JBHT',
-    'JBL', 'JCI', 'JD', 'JDZG', 'JFBR', 'JKHY', 'JMIA', 'JNJ', 'JPM', 'JSPR',
-    'JXG', 'JXN', 'K', 'KALA', 'KAPA', 'KAR', 'KBGGY', 'KD', 'KDP', 'KEN',
-    'KEP', 'KEWL', 'KEY', 'KEYS', 'KGC', 'KHC', 'KIM', 'KKR', 'KLAC', 'KMB',
-    'KMI', 'KMT', 'KNSA', 'KO', 'KOSS', 'KPRX', 'KR', 'KRMD', 'KRMN', 'KSS',
-    'KTOS', 'KTTA', 'KVUE', 'L', 'LAB', 'LAC', 'LAUR', 'LBRX', 'LCUT', 'LDOS',
-    'LEA', 'LEN', 'LEU', 'LEVI', 'LGHL', 'LH', 'LHX', 'LII', 'LIMN',
-    'LIN', 'LITM', 'LIVN', 'LKQ', 'LLY', 'LMT', 'LNC', 'LNG', 'LNT', 'LNZA',
-    'LOAR', 'LOMA', 'LOW', 'LRCX', 'LSANF', 'LSF', 'LSIIF', 'LULU', 'LUNR', 'LUV',
-    'LVS', 'LW', 'LXP', 'LYB', 'LYG', 'LYRA', 'LYSCF', 'LYV', 'MA', 'MAA',
-    'MAGH', 'MAIN', 'MALJF', 'MALRF', 'MALRY', 'MAR', 'MAS', 'MBIO', 'MBND',
-    'MCD', 'MCHB', 'MCHP', 'MCK', 'MCO', 'MCRB', 'MD', 'MDALF', 'MDCX', 'MDLZ',
-    'MDT', 'MEHCQ', 'MELI', 'MET', 'META', 'MFC', 'MGA', 'MGM', 'MHK', 'MIMTF',
-    'MIND', 'MIR', 'MJDLF', 'MKC', 'MLHKF', 'MLM', 'MLSPF', 'MMC', 'MMM', 'MMSMY',
-    'MNDR', 'MNST', 'MO', 'MOB', 'MOBQ', 'MOG-A', 'MOH', 'MOS', 'MP',
-    'MPC', 'MPLX', 'MPWR', 'MRCY', 'MRK', 'MRNA', 'MRVL', 'MS', 'MSCI', 'MSFT',
-    'MSI', 'MSILF', 'MSTR', 'MTB', 'MTC', 'MTCH', 'MTD', 'MTG', 'MTRN', 'MTUAY',
-    'MU', 'MUFG', 'MUX', 'MWYN', 'MYSZ', 'NATL', 'NB', 'NBIS', 'NBIX',
-    'NCLH', 'NCNA', 'NDAQ', 'NDSN', 'NEE', 'NEM', 'NERV', 'NEWP', 'NEXA', 'NFE',
-    'NFGC', 'NFLX', 'NGD', 'NGG', 'NGLOY', 'NGXXF', 'NHTC', 'NI', 'NIO',
-    'NKE', 'NLY', 'NMRA', 'NOC', 'NOMA', 'NOV', 'NOW', 'NPK', 'NPWR',
-    'NRG', 'NSC', 'NSKFF', 'NTAP', 'NTCT', 'NTES', 'NTRA', 'NTRP', 'NTRS', 'NU',
-    'NUAI', 'NUE', 'NUKK', 'NUVL', 'NVA', 'NVDA', 'NVMI', 'NVO', 'NVR',
-    'NVS', 'NVST', 'NWE', 'NWG', 'NWGL', 'NWN', 'NWS', 'NWSA', 'NXPI',
-    'NXTT', 'O', 'OBLG', 'ODFL', 'OFAL', 'OGS', 'OKE', 'OKLO', 'OKUR', 'OMC',
-    'OMF', 'OMH', 'ON', 'ONCO', 'ONEG', 'ONFO', 'ONMD', 'ONON',
-    'OPXS', 'ORA', 'ORCL', 'ORI', 'ORLY', 'OSTTF', 'OTIS', 'OUT', 'OXY',
-    'PAA', 'PAAS', 'PANW', 'PAPL', 'PARR', 'PATH', 'PAX', 'PAYC', 'PAYX', 'PCAR',
-    'PCG', 'PDD', 'PEG', 'PEP', 'PFE', 'PFG', 'PG', 'PGNY', 'PGR', 'PH',
-    'PHM', 'PHYS', 'PILL', 'PKE', 'PKG', 'PLD', 'PLRZ', 'PLTK', 'PLTR',
-    'PM', 'PMAX', 'PNC', 'PNR', 'PNRG', 'PNW', 'PODD', 'POOL', 'POR', 'POWI',
-    'PPCB', 'PPG', 'PPL', 'PRGO', 'PRMB', 'PRU', 'PRVA', 'PSA', 'PSHG', 'PSKY',
-    'PSX', 'PTC', 'PTN', 'PTNDY', 'PTY', 'PUK', 'PWR', 'PYPL', 'Q', 'QBTS',
-    'QCOM', 'QNTM', 'QNTQY', 'QQQ', 'QTTB', 'RBLX', 'RBOT', 'RCL', 'RDDT',
-    'RDHL', 'RDN', 'REE', 'REG', 'REGN', 'REKR', 'RF', 'RGTI', 'RHHBY',
-    'RIGL', 'RIO', 'RIVN', 'RJF', 'RKLB', 'RL', 'RMBS', 'RMD', 'RNMBY',
-    'ROIV', 'ROK', 'ROL', 'ROP', 'ROST', 'RPRX', 'RR', 'RRR', 'RSG',
-    'RTNTF', 'RTPPF', 'RTX', 'RVMD', 'RVTY', 'RWEOY', 'RWNFF', 'RY', 'RYCEY', 'RYOJ',
-    'RYTM', 'RZLV', 'SA', 'SAABF', 'SAABY', 'SAFRY', 'SAN', 'SANM', 'SARO', 'SBAC',
-    'SBCF', 'SBET', 'SBS', 'SBSW', 'SBUX', 'SCGLY', 'SCHW', 'SCNI', 'SCZMF', 'SEAT',
-    'SER', 'SF', 'SGBX', 'SGGKF', 'SGGKY', 'SGI', 'SGML', 'SGN', 'SHEL', 'SHOP',
-    'SHPH', 'SHW', 'SIF', 'SINT', 'SJM', 'SLB', 'SLE', 'SLNH', 'SLSR', 'SMCI',
-    'SMFG', 'SMLR', 'SMMYY', 'SMTK', 'SMX', 'SNA', 'SNEX', 'SNGX', 'SNOW',
-    'SNPS', 'SNT', 'SNTI', 'SO', 'SOBO', 'SOFI', 'SOGP', 'SOLS', 'SOLV', 'SONM',
-    'SOUHY', 'SOUN', 'SOXX', 'SPG', 'SPGI', 'SPNT', 'SPR', 'SR', 'SRE',
-    'SRL', 'SSKN', 'SSRM', 'STE', 'STEM', 'STKE', 'STKH', 'STLA', 'STLD',
-    'STMNF', 'STT', 'STTSY', 'STX', 'STZ', 'SU', 'SUPN', 'SVM', 'SW', 'SWK',
-    'SWKS', 'SYF', 'SYK', 'SYM', 'SYNX', 'SYY', 'T', 'TAC', 'TANH', 'TAP',
-    'TARS', 'TATT', 'TBBB', 'TCBI', 'TCKRF', 'TD', 'TDG', 'TDS', 'TDY', 'TE',
-    'TEAM', 'TECH', 'TECK', 'TEL', 'TEM', 'TER', 'TEVA', 'TFC', 'TFPM', 'TGEN',
-    'TGT', 'THBRF', 'THC', 'THLEF', 'THLLY', 'TIL', 'TIRX', 'TJX', 'TKO', 'TLN',
-    'TMO', 'TMQ', 'TMUS', 'TNIPF', 'TNK', 'TNL', 'TNXP', 'TPL', 'TPR',
-    'TRAW', 'TREX', 'TRGP', 'TRI', 'TRIB', 'TRMB', 'TROW', 'TRP', 'TRUG', 'TRV',
-    'TSCO', 'TSLA', 'TSM', 'TSN', 'TSSI', 'TT', 'TTD', 'TTMI', 'TTNNF', 'TTWO',
-    'TWG', 'TXN', 'TXNM', 'TXT', 'TYL', 'U', 'UAL', 'UAMY', 'UBER', 'UBS',
-    'UDR', 'UGI', 'UHS', 'UK', 'ULTA', 'UNH', 'UNP', 'UNPRF', 'UPS',
-    'UPST', 'URBN', 'URI', 'USAR', 'USAS', 'USAU', 'USB', 'USFD', 'USGO', 'UTHR',
-    'UUU', 'V', 'VEEE', 'VET', 'VGZ', 'VICI', 'VIPS', 'VIVK',
-    'VLO', 'VLTO', 'VMC', 'VOO', 'VOYG', 'VRCA', 'VRMTF', 'VRSK', 'VRSN', 'VRT',
-    'VRTX', 'VSEC', 'VST', 'VT', 'VTI', 'VTR', 'VTSI', 'VVX', 'VWAV',
-    'VZ', 'VZLA', 'WAB', 'WAI', 'WAT', 'WBA', 'WBD', 'WBUY', 'WBX',
-    'WDAY', 'WDC', 'WEC', 'WELL', 'WES', 'WFC', 'WIMI', 'WIT', 'WKSP', 'WM',
-    'WMB', 'WMT', 'WOK', 'WOLF', 'WPM', 'WRB', 'WSM', 'WST', 'WTRG', 'WTW',
-    'WWD', 'WY', 'WYNN', 'WYY', 'XBI', 'XEL', 'XLE', 'XLF',
-    'XLP', 'XLRE', 'XLU', 'XLV', 'XOM', 'XYL', 'XYZ', 'XZJCF', 'YOU', 'YUM',
-    'ZBH', 'ZBRA', 'ZTS', 'ZWS'
-]
+def get_nasdaq100_symbols() -> List[str]:
+    """Common NASDAQ 100 symbols."""
+    return [
+        'AAPL', 'MSFT', 'AMZN', 'NVDA', 'GOOGL', 'META', 'TSLA', 'AVGO', 'COST', 'NFLX',
+        'AMD', 'ADBE', 'PEP', 'CSCO', 'TMUS', 'INTC', 'CMCSA', 'TXN', 'QCOM', 'AMGN',
+        'HON', 'INTU', 'AMAT', 'ISRG', 'BKNG', 'SBUX', 'ADI', 'VRTX', 'MDLZ', 'GILD',
+        'ADP', 'REGN', 'LRCX', 'PANW', 'MU', 'SNPS', 'KLAC', 'CDNS', 'MELI', 'ASML',
+        'PYPL', 'MAR', 'ORLY', 'CTAS', 'MNST', 'NXPI', 'MRVL', 'WDAY', 'ADSK', 'CHTR',
+        'FTNT', 'KDP', 'AEP', 'PCAR', 'CPRT', 'PAYX', 'KHC', 'DXCM', 'EXC', 'ODFL',
+        'MCHP', 'ROST', 'IDXX', 'VRSK', 'FAST', 'EA', 'CTSH', 'XEL', 'BKR', 'GEHC',
+        'CSGP', 'FANG', 'ANSS', 'TEAM', 'DDOG', 'ZS', 'BIIB', 'ILMN', 'ENPH', 'WBD',
+        'LCID', 'RIVN', 'CEG', 'ON', 'GFS', 'SMCI', 'ARM', 'CRWD', 'DASH', 'TTD'
+    ]
 
 
-def get_default_tickers() -> List[str]:
-    """Return the default trading universe."""
-    return clean_ticker_list(DEFAULT_TICKERS)
+def get_swing_universe() -> List[str]:
+    """
+    Combined swing trading universe.
+    Includes: Core watchlist + Russell 2000 + S&P 600 + Speculative picks
+    Excludes: OTC stocks
+    """
+    return [
+        'A', 'AAPL', 'AAUC', 'ABBV', 'ABCB', 'ABEV', 'ABNB', 'ABT', 'ACAD', 'ACGL',
+        'ACHR', 'ACN', 'ACTU', 'ADBE', 'ADI', 'ADM', 'ADP', 'ADSK', 'ADTX', 'AEE',
+        'AEG', 'AEHL', 'AEM', 'AEP', 'AES', 'AESI', 'AEVA', 'AFL', 'AG', 'AGI',
+        'AGMH', 'AGRI', 'AGRZ', 'AI', 'AIG', 'AIR', 'AIRO', 'AIZ', 'AJG', 'AKAM',
+        'AL', 'ALAB', 'ALB', 'ALE', 'ALEX', 'ALGN', 'ALIT', 'ALL', 'ALLE', 'ALLR',
+        'ALLY', 'ALM', 'ALV', 'AM', 'AMAT', 'AMBP', 'AMC', 'AMCR', 'AMD', 'AME',
+        'AMGN', 'AMKR', 'AMP', 'AMPY', 'AMRK', 'AMT', 'AMTM', 'AMZN', 'ANET', 'ANF',
+        'AON', 'AOS', 'APA', 'APD', 'APH', 'APO', 'APP', 'APTV', 'APUS', 'APVO',
+        'AQB', 'AQMS', 'ARE', 'ARM', 'ARMN', 'ARTV', 'ARWR', 'ASAN', 'ASH', 'ASLE',
+        'ASM', 'ASML', 'ASND', 'ASNS', 'ASPN', 'ASTL', 'ASTS', 'ASX', 'ATAT', 'ATEC',
+        'ATI', 'ATMU', 'ATMV', 'ATO', 'ATRC', 'ATRO', 'ATROB', 'AU', 'AUPH', 'AUR',
+        'AUTL', 'AVA', 'AVAV', 'AVB', 'AVGO', 'AVY', 'AWK', 'AXON', 'AXP', 'AXS',
+        'AXSM', 'AZ', 'AZN', 'AZO', 'B', 'BA', 'BABA', 'BAC', 'BALL', 'BANC',
+        'BAX', 'BBAI', 'BBIO', 'BBVA', 'BBWI', 'BBY', 'BCCC', 'BCS', 'BDSX', 'BDX',
+        'BEN', 'BEP', 'BEPC', 'BETA', 'BF-B', 'BG', 'BHC', 'BHP', 'BIIB', 'BIOA',
+        'BIPC', 'BITF', 'BITO', 'BK', 'BKCH', 'BKE', 'BKH', 'BKNG', 'BKR', 'BKU',
+        'BLBX', 'BLDR', 'BLK', 'BLNE', 'BLSH', 'BMNR', 'BMO', 'BMY', 'BN', 'BNS',
+        'BOLD', 'BORR', 'BP', 'BPOP', 'BR', 'BRAG', 'BRK-B', 'BRN', 'BRO', 'BRSL',
+        'BSX', 'BTAI', 'BTBD', 'BTC', 'BTDR', 'BTG', 'BTI', 'BTM', 'BURU', 'BVN',
+        'BWA', 'BWAY', 'BWXT', 'BX', 'BXMT', 'BXP', 'BYD', 'BYRN', 'C', 'CADE',
+        'CAE', 'CAG', 'CAH', 'CAI', 'CAL', 'CAN', 'CAPR', 'CAPS', 'CARR', 'CAT',
+        'CAVA', 'CB', 'CBOE', 'CBRE', 'CC', 'CCCX', 'CCEP', 'CCHH', 'CCI', 'CCJ',
+        'CCL', 'CDE', 'CDNS', 'CDRE', 'CDW', 'CEG', 'CELH', 'CEPU', 'CETX', 'CF',
+        'CFG', 'CG', 'CHA', 'CHAI', 'CHD', 'CHRS', 'CHRW', 'CHTR', 'CHWY', 'CHYM',
+        'CI', 'CIFR', 'CINF', 'CL', 'CLF', 'CLFD', 'CLRO', 'CLS', 'CLSK', 'CLVT',
+        'CLX', 'CM', 'CMA', 'CMBT', 'CMCSA', 'CMCT', 'CME', 'CMP', 'CMPX', 'CMS',
+        'CNC', 'CNH', 'CNL', 'CNO', 'CNP', 'CNTY', 'COCO', 'COEP', 'COF', 'COHR',
+        'COIN', 'COKE', 'COLL', 'CONL', 'COO', 'COOT', 'COP', 'COR', 'COST', 'CPAY',
+        'CPB', 'CPRT', 'CPT', 'CRBG', 'CRCL', 'CRDO', 'CRIS', 'CRL', 'CRM', 'CRML',
+        'CRSR', 'CRWD', 'CRWV', 'CSCO', 'CSGP', 'CSGS', 'CSIQ', 'CSX', 'CTAS', 'CTGO',
+        'CTRA', 'CTRE', 'CTSH', 'CTVA', 'CUK', 'CVE', 'CVI', 'CVS', 'CVX', 'CWEN',
+        'CWEN-A', 'D', 'DAL', 'DASH', 'DAY', 'DB', 'DCO', 'DD', 'DDOG', 'DE',
+        'DECK', 'DEFT', 'DELL', 'DEO', 'DEVS', 'DG', 'DGX', 'DHI', 'DHR', 'DINO',
+        'DIS', 'DJT', 'DLR', 'DLTR', 'DLXY', 'DNN', 'DOC', 'DOV', 'DOW', 'DPRO',
+        'DPZ', 'DRI', 'DRS', 'DRUG', 'DTE', 'DTIL', 'DTM', 'DUK', 'DV', 'DVA',
+        'DVN', 'DVS', 'DXCM', 'DXF', 'EA', 'EBAY', 'ECL', 'ECX', 'ED', 'EFX',
+        'EG', 'EGO', 'EH', 'EIX', 'EJH', 'EKSO', 'EL', 'ELF', 'ELME', 'ELV',
+        'ELVR', 'EMBJ', 'EME', 'EMMS', 'EMR', 'ENB', 'ENSG', 'ENTO', 'EPAM', 'EPD',
+        'EQIX', 'EQNR', 'EQR', 'EQT', 'ERIE', 'ERO', 'ES', 'ESNT', 'ESS', 'ETHM',
+        'ETN', 'ETR', 'EVAX', 'EVEX', 'EVRG', 'EVTL', 'EW', 'EWBC', 'EXAS', 'EXC',
+        'EXE', 'EXEL', 'EXK', 'EXPD', 'EXPE', 'EXR', 'EYE', 'F', 'FANG', 'FAST',
+        'FBYD', 'FCX', 'FDS', 'FDX', 'FE', 'FFIV', 'FGI', 'FHI', 'FHN', 'FIEE',
+        'FIGS', 'FIS', 'FITB', 'FIX', 'FLNC', 'FLR', 'FLY', 'FMCC', 'FMX', 'FNB',
+        'FNV', 'FOFO', 'FORD', 'FOUR', 'FOX', 'FOXA', 'FRMI', 'FRO', 'FRT', 'FSLR',
+        'FSM', 'FTNT', 'FTS', 'FTV', 'FWRD', 'GAUZ', 'GCTK', 'GD', 'GDDY', 'GDIV',
+        'GE', 'GEHC', 'GEN', 'GENI', 'GEO', 'GEOS', 'GEV', 'GFAI', 'GFI', 'GFS',
+        'GIBO', 'GIL', 'GILD', 'GIS', 'GL', 'GLD', 'GLW', 'GM', 'GMAB', 'GME',
+        'GNRC', 'GOLD', 'GOOG', 'GOOGL', 'GOTU', 'GPC', 'GPK', 'GPN', 'GRMN', 'GRRR',
+        'GS', 'GSAT', 'GSK', 'GTX', 'GVA', 'GWAV', 'GWW', 'HAL', 'HAO', 'HAS',
+        'HASI', 'HBAN', 'HBM', 'HCA', 'HCWB', 'HD', 'HEI', 'HELE', 'HG', 'HHS',
+        'HIG', 'HII', 'HIMS', 'HL', 'HLF', 'HLT', 'HMY', 'HNRG', 'HOLO', 'HOLX',
+        'HON', 'HOOD', 'HOVR', 'HP', 'HPE', 'HPQ', 'HRL', 'HSIC', 'HST', 'HSY',
+        'HUBB', 'HUM', 'HUN', 'HUT', 'HWM', 'HXL', 'HYFT', 'HYMC', 'HYPD', 'IAG',
+        'IBG', 'IBM', 'IBRX', 'ICE', 'IDA', 'IDR', 'IDXX', 'IE', 'IEX', 'IFF',
+        'IMNN', 'IMO', 'IMSR', 'INCY', 'INDV', 'ING', 'INMB', 'INSM', 'INSP', 'INSW',
+        'INTC', 'INTR', 'INTT', 'INTU', 'INUV', 'INVH', 'IONQ', 'IONS', 'IOT', 'IOTR',
+        'IP', 'IPG', 'IPX', 'IQV', 'IR', 'IRBT', 'IREN', 'IRM', 'IRTC', 'ISRG',
+        'ISSC', 'IT', 'ITRG', 'ITUB', 'ITW', 'IVDA', 'IVF', 'IVVD', 'IVZ', 'IWM',
+        'J', 'JAGX', 'JBDI', 'JBHT', 'JBL', 'JCI', 'JD', 'JDZG', 'JFBR', 'JKHY',
+        'JMIA', 'JNJ', 'JPM', 'JSPR', 'JXG', 'JXN', 'K', 'KALA', 'KAPA', 'KAR',
+        'KD', 'KDP', 'KEN', 'KEP', 'KEWL', 'KEY', 'KEYS', 'KGC', 'KHC', 'KIM',
+        'KKR', 'KLAC', 'KMB', 'KMI', 'KMT', 'KNSA', 'KO', 'KOSS', 'KPRX', 'KR',
+        'KRMD', 'KRMN', 'KSS', 'KTOS', 'KTTA', 'KVUE', 'L', 'LAB', 'LAC', 'LAUR',
+        'LBRX', 'LCUT', 'LDOS', 'LEA', 'LEG', 'LEN', 'LEU', 'LEVI', 'LGHL', 'LH',
+        'LHX', 'LII', 'LIMN', 'LIN', 'LITM', 'LIVN', 'LKQ', 'LLY', 'LMT', 'LNC',
+        'LNG', 'LNT', 'LNZA', 'LOAR', 'LOMA', 'LOW', 'LRCX', 'LSF', 'LULU', 'LUNR',
+        'LUV', 'LVS', 'LW', 'LXP', 'LYB', 'LYG', 'LYRA', 'LYV', 'MA', 'MAA',
+        'MAGH', 'MAIN', 'MAR', 'MARA', 'MAS', 'MBIO', 'MBND', 'MCD', 'MCHB', 'MCHP',
+        'MCK', 'MCO', 'MCRB', 'MD', 'MDCX', 'MDLZ', 'MDT', 'MELI', 'MET', 'META',
+        'MFC', 'MGA', 'MGM', 'MHK', 'MIND', 'MIR', 'MKC', 'MLM', 'MMC', 'MMM',
+        'MNDR', 'MNST', 'MO', 'MOB', 'MOBQ', 'MODG', 'MOG-A', 'MOH', 'MOS', 'MP',
+        'MPC', 'MPLX', 'MPWR', 'MRCY', 'MRK', 'MRNA', 'MRVL', 'MS', 'MSCI', 'MSFT',
+        'MSI', 'MSTR', 'MTB', 'MTC', 'MTCH', 'MTD', 'MTG', 'MTRN', 'MU', 'MUFG',
+        'MUX', 'MWYN', 'MYSZ', 'NAK', 'NATL', 'NB', 'NBIS', 'NBIX', 'NCLH', 'NCNA',
+        'NDAQ', 'NDSN', 'NEE', 'NEM', 'NERV', 'NEWP', 'NEXA', 'NFE', 'NFGC', 'NFLX',
+        'NG', 'NGD', 'NGG', 'NHTC', 'NI', 'NIO', 'NKE', 'NLY', 'NMRA', 'NOC',
+        'NOMA', 'NOV', 'NOW', 'NPK', 'NPWR', 'NRDY', 'NRG', 'NSC', 'NTAP', 'NTCT',
+        'NTES', 'NTRA', 'NTRP', 'NTRS', 'NU', 'NUAI', 'NUE', 'NUKK', 'NUVL', 'NVA',
+        'NVDA', 'NVMI', 'NVO', 'NVR', 'NVRI', 'NVS', 'NVST', 'NWE', 'NWG', 'NWGL',
+        'NWL', 'NWN', 'NWS', 'NWSA', 'NXPI', 'NXTT', 'O', 'OBLG', 'ODFL', 'OFAL',
+        'OGS', 'OKE', 'OKLO', 'OKUR', 'OMC', 'OMF', 'OMH', 'ON', 'ONCO', 'ONDS',
+        'ONEG', 'ONFO', 'ONMD', 'ONON', 'OPEN', 'OPXS', 'ORA', 'ORCL', 'ORI', 'ORLY',
+        'OSCR', 'OTIS', 'OUT', 'OXY', 'PAA', 'PAAS', 'PANW', 'PAPL', 'PARR', 'PATH',
+        'PAX', 'PAYC', 'PAYX', 'PCAR', 'PCG', 'PDD', 'PEG', 'PEP', 'PFE', 'PFG',
+        'PG', 'PGNY', 'PGR', 'PH', 'PHM', 'PHYS', 'PILL', 'PKE', 'PKG', 'PL',
+        'PLD', 'PLRZ', 'PLTK', 'PLTR', 'PM', 'PMAX', 'PNC', 'PNR', 'PNRG', 'PNW',
+        'PODD', 'POOL', 'POR', 'POWI', 'PPCB', 'PPG', 'PPL', 'PRGO', 'PRMB', 'PRU',
+        'PRVA', 'PSA', 'PSHG', 'PSKY', 'PSX', 'PTC', 'PTN', 'PTY', 'PUK', 'PWR',
+        'PYPL', 'Q', 'QBTS', 'QCOM', 'QNTM', 'QQQ', 'QS', 'QTTB', 'RBLX', 'RBOT',
+        'RCL', 'RDDT', 'RDHL', 'RDN', 'RDW', 'REE', 'REG', 'REGN', 'REKR', 'RF',
+        'RGTI', 'RIGL', 'RIO', 'RIOT', 'RIVN', 'RJF', 'RKLB', 'RL', 'RMBS', 'RMD',
+        'ROIV', 'ROK', 'ROL', 'ROP', 'ROST', 'RPRX', 'RR', 'RRR', 'RSG', 'RTX',
+        'RVMD', 'RVTY', 'RY', 'RYOJ', 'RYTM', 'RZLV', 'SA', 'SAN', 'SANM', 'SARO',
+        'SBAC', 'SBCF', 'SBET', 'SBS', 'SBSW', 'SBUX', 'SCHW', 'SCNI', 'SEAT', 'SER',
+        'SF', 'SGBX', 'SGI', 'SGML', 'SGN', 'SHEL', 'SHOP', 'SHPH', 'SHW', 'SIF',
+        'SINT', 'SJM', 'SLB', 'SLE', 'SLNH', 'SLSR', 'SMCI', 'SMFG', 'SMLR', 'SMR',
+        'SMTK', 'SMX', 'SNA', 'SNBR', 'SNEX', 'SNGX', 'SNOW', 'SNPS', 'SNT', 'SNTI',
+        'SO', 'SOBO', 'SOFI', 'SOGP', 'SOLS', 'SOLV', 'SONM', 'SOUN', 'SOXX', 'SPAI',
+        'SPG', 'SPGI', 'SPNT', 'SPR', 'SR', 'SRE', 'SRL', 'SSKN', 'SSRM', 'STE',
+        'STEM', 'STKE', 'STKH', 'STKL', 'STLA', 'STLD', 'STT', 'STX', 'STZ', 'SU',
+        'SUPN', 'SVM', 'SW', 'SWK', 'SWKS', 'SYF', 'SYK', 'SYM', 'SYNX', 'SYY',
+        'T', 'TAC', 'TANH', 'TAP', 'TARS', 'TATT', 'TBBB', 'TCBI', 'TD', 'TDG',
+        'TDS', 'TDY', 'TE', 'TEAM', 'TECH', 'TECK', 'TEL', 'TEM', 'TER', 'TEVA',
+        'TFC', 'TFPM', 'TGEN', 'TGT', 'THC', 'TIL', 'TIRX', 'TJX', 'TKO', 'TLN',
+        'TMC', 'TMO', 'TMQ', 'TMUS', 'TNK', 'TNL', 'TNXP', 'TPL', 'TPR', 'TRAW',
+        'TREX', 'TRGP', 'TRI', 'TRIB', 'TRMB', 'TROW', 'TRP', 'TRUG', 'TRV', 'TSCO',
+        'TSLA', 'TSM', 'TSN', 'TSSI', 'TT', 'TTD', 'TTMI', 'TTWO', 'TWG', 'TXN',
+        'TXNM', 'TXT', 'TYL', 'U', 'UAL', 'UAMY', 'UBER', 'UBS', 'UDR', 'UEC',
+        'UGI', 'UHS', 'UK', 'ULTA', 'UNH', 'UNP', 'UPS', 'UPST', 'URBN', 'URI',
+        'USAR', 'USAS', 'USAU', 'USB', 'USFD', 'USGO', 'UTHR', 'UUU', 'UUUU', 'V',
+        'VEEE', 'VET', 'VGZ', 'VIAV', 'VICI', 'VIPS', 'VIVK', 'VLO', 'VLTO', 'VMC',
+        'VOO', 'VOYG', 'VRCA', 'VRSK', 'VRSN', 'VRT', 'VRTX', 'VSEC', 'VST', 'VT',
+        'VTI', 'VTR', 'VTSI', 'VUZI', 'VVX', 'VWAV', 'VYX', 'VZ', 'VZLA', 'WAB',
+        'WAI', 'WAT', 'WBA', 'WBD', 'WBUY', 'WBX', 'WDAY', 'WDC', 'WEC', 'WELL',
+        'WES', 'WFC', 'WIMI', 'WIT', 'WKSP', 'WM', 'WMB', 'WMT', 'WOK', 'WOLF',
+        'WPM', 'WRB', 'WSM', 'WST', 'WTRG', 'WTW', 'WULF', 'WWD', 'WWW', 'WY',
+        'WYNN', 'WYY', 'XBI', 'XEL', 'XLE', 'XLF', 'XLP', 'XLRE', 'XLU', 'XLV',
+        'XOM', 'XYL', 'XYZ', 'YOU', 'YUM', 'ZBH', 'ZBRA', 'ZTS', 'ZWS',
+    ]
 
 
 # ============================================================================
@@ -693,34 +599,24 @@ def calculate_weekly_squeeze(df: pd.DataFrame,
 # DATA FETCHING
 # ============================================================================
 
-def fetch_weekly_data(symbol: str, weeks: int = 52) -> Optional[Tuple[pd.DataFrame, str]]:
+def fetch_weekly_data(symbol: str, weeks: int = 52) -> Optional[pd.DataFrame]:
     """
     Fetch daily data and resample to weekly for most current data.
-    Also returns sector to avoid extra API calls later.
-
+    
     Native yfinance weekly data often lags by a week. By fetching daily
     and resampling to Friday close, we get the most recent complete week.
-
-    Returns: (DataFrame, sector) tuple or None
     """
     try:
         ticker = yf.Ticker(symbol)
         end_date = datetime.now()
         start_date = end_date - timedelta(days=weeks * 7 + 30)
-
-        # Get sector from info (same API call)
-        try:
-            info = ticker.info
-            sector = info.get('sector') or info.get('category') or 'Unknown'
-        except Exception:
-            sector = 'Unknown'
-
+        
         # Fetch daily data
         df = ticker.history(start=start_date, end=end_date, interval='1d')
-
+        
         if df is None or df.empty:
             return None
-
+        
         # Resample to weekly (Friday close)
         df = df.resample('W-FRI').agg({
             'Open': 'first',
@@ -729,11 +625,11 @@ def fetch_weekly_data(symbol: str, weeks: int = 52) -> Optional[Tuple[pd.DataFra
             'Close': 'last',
             'Volume': 'sum'
         }).dropna()
-
+        
         if len(df) < 20:
             return None
-
-        return (df, sector)
+        
+        return df
     except Exception as e:
         return None
 
@@ -747,19 +643,16 @@ def analyze_symbol(symbol: str) -> Optional[Dict]:
     time.sleep(random.uniform(0.05, 0.15))
 
     try:
-        result = fetch_weekly_data(symbol)
-        if result is None:
+        df = fetch_weekly_data(symbol)
+        if df is None:
             return None
-
-        df, sector = result
 
         squeeze_data = calculate_weekly_squeeze(df)
         if squeeze_data is None:
             return None
 
-        # Add symbol, sector, and price info
+        # Add symbol and price info
         squeeze_data['symbol'] = symbol
-        squeeze_data['sector'] = sector
         squeeze_data['weekly_change_pct'] = (
             (squeeze_data['current_price'] - squeeze_data['prev_close']) /
             squeeze_data['prev_close'] * 100
