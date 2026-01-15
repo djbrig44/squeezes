@@ -34,6 +34,7 @@ from weekend_squeeze_scanner import (
     get_default_tickers,
     scan_for_squeeze_fires,
     calculate_sunday_score,
+    push_squeeze_signals_to_airtable,
 )
 
 
@@ -235,6 +236,9 @@ def run_scan_and_email(dry_run: bool = False, tickers: list = None):
     for stock in fired_green:
         if 'sunday_score' not in stock:
             stock['sunday_score'] = calculate_sunday_score(stock)
+
+    # Push GREEN fires to Airtable
+    push_squeeze_signals_to_airtable(fired_green, fired_red, ready_to_fire, in_squeeze)
 
     # Format and send email
     subject, html_body = format_squeeze_email(fired_green)
