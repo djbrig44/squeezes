@@ -207,8 +207,8 @@ def push_squeeze_signals_to_airtable(
         if 'sunday_score' not in stock:
             stock['sunday_score'] = calculate_sunday_score(stock)
 
-        # Get sector (cached if possible)
-        sector = get_sector(sym)
+        # Use sector from scan phase (avoids extra API calls)
+        sector = stock.get('sector', 'Unknown')
 
         # Build fields matching Swing System structure
         fields = {
@@ -693,24 +693,34 @@ def calculate_weekly_squeeze(df: pd.DataFrame,
 # DATA FETCHING
 # ============================================================================
 
-def fetch_weekly_data(symbol: str, weeks: int = 52) -> Optional[pd.DataFrame]:
+def fetch_weekly_data(symbol: str, weeks: int = 52) -> Optional[Tuple[pd.DataFrame, str]]:
     """
     Fetch daily data and resample to weekly for most current data.
-    
+    Also returns sector to avoid extra API calls later.
+
     Native yfinance weekly data often lags by a week. By fetching daily
     and resampling to Friday close, we get the most recent complete week.
+
+    Returns: (DataFrame, sector) tuple or None
     """
     try:
         ticker = yf.Ticker(symbol)
         end_date = datetime.now()
         start_date = end_date - timedelta(days=weeks * 7 + 30)
-        
+
+        # Get sector from info (same API call)
+        try:
+            info = ticker.info
+            sector = info.get('sector') or info.get('category') or 'Unknown'
+        except Exception:
+            sector = 'Unknown'
+
         # Fetch daily data
         df = ticker.history(start=start_date, end=end_date, interval='1d')
-        
+
         if df is None or df.empty:
             return None
-        
+
         # Resample to weekly (Friday close)
         df = df.resample('W-FRI').agg({
             'Open': 'first',
@@ -719,11 +729,11 @@ def fetch_weekly_data(symbol: str, weeks: int = 52) -> Optional[pd.DataFrame]:
             'Close': 'last',
             'Volume': 'sum'
         }).dropna()
-        
+
         if len(df) < 20:
             return None
-        
-        return df
+
+        return (df, sector)
     except Exception as e:
         return None
 
@@ -737,16 +747,19 @@ def analyze_symbol(symbol: str) -> Optional[Dict]:
     time.sleep(random.uniform(0.05, 0.15))
 
     try:
-        df = fetch_weekly_data(symbol)
-        if df is None:
+        result = fetch_weekly_data(symbol)
+        if result is None:
             return None
+
+        df, sector = result
 
         squeeze_data = calculate_weekly_squeeze(df)
         if squeeze_data is None:
             return None
 
-        # Add symbol and price info
+        # Add symbol, sector, and price info
         squeeze_data['symbol'] = symbol
+        squeeze_data['sector'] = sector
         squeeze_data['weekly_change_pct'] = (
             (squeeze_data['current_price'] - squeeze_data['prev_close']) /
             squeeze_data['prev_close'] * 100
