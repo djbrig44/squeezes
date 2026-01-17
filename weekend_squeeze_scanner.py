@@ -634,8 +634,13 @@ def fetch_weekly_data(symbol: str, weeks: int = 52) -> Optional[pd.DataFrame]:
         return None
 
 
-def analyze_symbol(symbol: str) -> Optional[Dict]:
-    """Analyze a single symbol for weekly squeeze status."""
+def analyze_symbol(symbol: str, min_avg_volume: int = 500000) -> Optional[Dict]:
+    """Analyze a single symbol for weekly squeeze status.
+
+    Args:
+        symbol: Stock ticker symbol
+        min_avg_volume: Minimum average daily volume (default 500k)
+    """
     import time
     import random
 
@@ -643,6 +648,14 @@ def analyze_symbol(symbol: str) -> Optional[Dict]:
     time.sleep(random.uniform(0.05, 0.15))
 
     try:
+        # Check volume before fetching full data
+        ticker = yf.Ticker(symbol)
+        info = ticker.info
+        avg_volume = info.get('averageVolume', 0) or 0
+
+        if avg_volume < min_avg_volume:
+            return None  # Skip low-volume stocks
+
         df = fetch_weekly_data(symbol)
         if df is None:
             return None
@@ -650,6 +663,9 @@ def analyze_symbol(symbol: str) -> Optional[Dict]:
         squeeze_data = calculate_weekly_squeeze(df)
         if squeeze_data is None:
             return None
+
+        # Store avg volume for reference
+        squeeze_data['avg_volume'] = avg_volume
 
         # Add symbol and price info
         squeeze_data['symbol'] = symbol
