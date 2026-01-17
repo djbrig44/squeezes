@@ -496,20 +496,46 @@ def calculate_weekly_squeeze(df: pd.DataFrame,
     bb_upper = bb_mid + (bb_mult * bb_std)
     bb_lower = bb_mid - (bb_mult * bb_std)
     
-    # --- Keltner Channels (using ATR) ---
+    # --- Keltner Channels (using ATR) - 3 LEVELS like TOS ---
     tr = pd.concat([
         high - low,
         (high - close.shift(1)).abs(),
         (low - close.shift(1)).abs()
     ], axis=1).max(axis=1)
     atr = tr.ewm(span=kc_length, adjust=False).mean()
-    
+
     kc_mid = close.rolling(kc_length).mean()
-    kc_upper = kc_mid + (kc_mult * atr)
-    kc_lower = kc_mid - (kc_mult * atr)
-    
-    # --- Squeeze Detection ---
-    squeeze_on = (bb_lower > kc_lower) & (bb_upper < kc_upper)
+
+    # KC multipliers matching TOS TTM Squeeze Pro
+    kc_mult_low = 1.5   # Low compression (widest)
+    kc_mult_mid = 1.2   # Mid compression
+    kc_mult_high = 1.0  # High compression (tightest)
+
+    # Low squeeze (widest KC)
+    kc_low_upper = kc_mid + (kc_mult_low * atr)
+    kc_low_lower = kc_mid - (kc_mult_low * atr)
+    in_low_squeeze = (bb_lower > kc_low_lower) & (bb_upper < kc_low_upper)
+
+    # Mid squeeze
+    kc_mid_upper = kc_mid + (kc_mult_mid * atr)
+    kc_mid_lower = kc_mid - (kc_mult_mid * atr)
+    in_mid_squeeze = (bb_lower > kc_mid_lower) & (bb_upper < kc_mid_upper)
+
+    # High squeeze (tightest KC)
+    kc_high_upper = kc_mid + (kc_mult_high * atr)
+    kc_high_lower = kc_mid - (kc_mult_high * atr)
+    in_high_squeeze = (bb_lower > kc_high_lower) & (bb_upper < kc_high_upper)
+
+    # --- Squeeze State Logic (priority: High > Mid > Low) ---
+    squeeze_high = in_high_squeeze
+    squeeze_mid = in_mid_squeeze & ~squeeze_high
+    squeeze_low = in_low_squeeze & ~squeeze_high & ~squeeze_mid
+
+    # MEANINGFUL squeeze = Mid + High only (ignore Low like TOS)
+    meaningful_squeeze = squeeze_high | squeeze_mid
+
+    # Legacy squeeze_on for compatibility (any squeeze)
+    squeeze_on = in_low_squeeze
     
     # --- TRUE TTM SQUEEZE MOMENTUM ---
     # Midline = average of (Donchian midline + SMA)
@@ -535,36 +561,49 @@ def calculate_weekly_squeeze(df: pd.DataFrame,
     momentum = deviation.rolling(mom_length).apply(linreg_value, raw=True)
     
     # Current values
+    current_meaningful = meaningful_squeeze.iloc[-1] if len(meaningful_squeeze) > 0 else False
+    prev_meaningful = meaningful_squeeze.iloc[-2] if len(meaningful_squeeze) > 1 else False
     current_squeeze = squeeze_on.iloc[-1] if len(squeeze_on) > 0 else False
     prev_squeeze = squeeze_on.iloc[-2] if len(squeeze_on) > 1 else False
     current_mom = momentum.iloc[-1] if len(momentum) > 0 else 0
     prev_mom = momentum.iloc[-2] if len(momentum) > 1 else 0
-    
-    # Squeeze fired = was on, now off
-    squeeze_fired = prev_squeeze and not current_squeeze
-    
-    # Count bars in squeeze (looking back)
-    # If currently in squeeze, start from current bar
-    # If squeeze just fired, start from previous bar
-    bars_in_squeeze = 0
-    start_idx = 2 if squeeze_fired else 1
-    
-    for i in range(start_idx, min(50, len(squeeze_on))):
-        if squeeze_on.iloc[-i]:
-            bars_in_squeeze += 1
+
+    # Count bars in MEANINGFUL squeeze (Mid + High only)
+    bars_in_meaningful_squeeze = 0
+    for i in range(1, min(50, len(meaningful_squeeze))):
+        if meaningful_squeeze.iloc[-i]:
+            bars_in_meaningful_squeeze += 1
         else:
             break
-    
-    # Fire direction
+
+    # Squeeze fired = was in MEANINGFUL squeeze, now NOT in meaningful squeeze
+    # AND had at least 6 bars in meaningful squeeze (like TOS minSqueezeBars)
+    meaningful_squeeze_ended = prev_meaningful and not current_meaningful
+    squeeze_fired = meaningful_squeeze_ended and bars_in_meaningful_squeeze >= 6
+
+    # Count bars for display (use meaningful squeeze count)
+    bars_in_squeeze = bars_in_meaningful_squeeze
+
+    # Fire direction (only if squeeze actually fired)
     fire_direction = None
     if squeeze_fired:
         fire_direction = 'GREEN' if current_mom > 0 else 'RED'
     
     # Momentum acceleration
     mom_accel = current_mom - prev_mom if not pd.isna(prev_mom) else 0
-    
-    # Ready = currently in squeeze with 6+ bars
-    ready = current_squeeze and bars_in_squeeze >= 6
+
+    # Ready = currently in MEANINGFUL squeeze with 6+ bars
+    ready = current_meaningful and bars_in_meaningful_squeeze >= 6
+
+    # Squeeze state for display
+    if squeeze_high.iloc[-1]:
+        squeeze_state = 'HIGH'
+    elif squeeze_mid.iloc[-1]:
+        squeeze_state = 'MID'
+    elif squeeze_low.iloc[-1]:
+        squeeze_state = 'LOW'
+    else:
+        squeeze_state = 'NONE'
     
     # Get last 10 bars of squeeze status for debugging
     squeeze_history = squeeze_on.tail(10).tolist()
@@ -576,8 +615,8 @@ def calculate_weekly_squeeze(df: pd.DataFrame,
     data_stale = days_old > 10
     
     return {
-        'squeeze_on': bool(current_squeeze),
-        'prev_squeeze': bool(prev_squeeze),
+        'squeeze_on': bool(current_meaningful),  # Now tracks meaningful squeeze
+        'prev_squeeze': bool(prev_meaningful),
         'squeeze_fired': bool(squeeze_fired),
         'fire_direction': fire_direction,
         'momentum': float(current_mom) if not pd.isna(current_mom) else 0,
@@ -591,7 +630,8 @@ def calculate_weekly_squeeze(df: pd.DataFrame,
         'squeeze_history': squeeze_history,
         'bar_dates': bar_dates,
         'data_stale': data_stale,
-        'last_bar_date': str(last_bar_date)
+        'last_bar_date': str(last_bar_date),
+        'squeeze_state': squeeze_state,  # HIGH, MID, LOW, or NONE
     }
 
 
