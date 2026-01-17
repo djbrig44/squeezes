@@ -639,10 +639,36 @@ def calculate_weekly_squeeze(df: pd.DataFrame,
 # DATA FETCHING
 # ============================================================================
 
+def fetch_daily_data(symbol: str, days: int = 120) -> Optional[pd.DataFrame]:
+    """
+    Fetch daily data for daily squeeze analysis.
+
+    Args:
+        symbol: Stock ticker
+        days: Number of days of history (default 120 for ~6 months)
+    """
+    try:
+        ticker = yf.Ticker(symbol)
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=days + 30)
+
+        df = ticker.history(start=start_date, end=end_date, interval='1d')
+
+        if df is None or df.empty:
+            return None
+
+        if len(df) < 20:
+            return None
+
+        return df
+    except Exception as e:
+        return None
+
+
 def fetch_weekly_data(symbol: str, weeks: int = 52) -> Optional[pd.DataFrame]:
     """
     Fetch daily data and resample to weekly for most current data.
-    
+
     Native yfinance weekly data often lags by a week. By fetching daily
     and resampling to Friday close, we get the most recent complete week.
     """
@@ -650,13 +676,13 @@ def fetch_weekly_data(symbol: str, weeks: int = 52) -> Optional[pd.DataFrame]:
         ticker = yf.Ticker(symbol)
         end_date = datetime.now()
         start_date = end_date - timedelta(days=weeks * 7 + 30)
-        
+
         # Fetch daily data
         df = ticker.history(start=start_date, end=end_date, interval='1d')
-        
+
         if df is None or df.empty:
             return None
-        
+
         # Resample to weekly (Friday close)
         df = df.resample('W-FRI').agg({
             'Open': 'first',
@@ -665,21 +691,22 @@ def fetch_weekly_data(symbol: str, weeks: int = 52) -> Optional[pd.DataFrame]:
             'Close': 'last',
             'Volume': 'sum'
         }).dropna()
-        
+
         if len(df) < 20:
             return None
-        
+
         return df
     except Exception as e:
         return None
 
 
-def analyze_symbol(symbol: str, min_avg_volume: int = 500000) -> Optional[Dict]:
-    """Analyze a single symbol for weekly squeeze status.
+def analyze_symbol(symbol: str, min_avg_volume: int = 500000, timeframe: str = 'weekly') -> Optional[Dict]:
+    """Analyze a single symbol for squeeze status.
 
     Args:
         symbol: Stock ticker symbol
         min_avg_volume: Minimum average daily volume (default 500k)
+        timeframe: 'weekly' or 'daily'
     """
     import time
     import random
@@ -696,20 +723,27 @@ def analyze_symbol(symbol: str, min_avg_volume: int = 500000) -> Optional[Dict]:
         if avg_volume < min_avg_volume:
             return None  # Skip low-volume stocks
 
-        df = fetch_weekly_data(symbol)
+        # Fetch data based on timeframe
+        if timeframe == 'daily':
+            df = fetch_daily_data(symbol)
+        else:
+            df = fetch_weekly_data(symbol)
+
         if df is None:
             return None
 
-        squeeze_data = calculate_weekly_squeeze(df)
+        squeeze_data = calculate_weekly_squeeze(df)  # Same calc works for both
         if squeeze_data is None:
             return None
 
-        # Store avg volume for reference
+        # Store avg volume and timeframe for reference
         squeeze_data['avg_volume'] = avg_volume
+        squeeze_data['timeframe'] = timeframe
 
         # Add symbol and price info
         squeeze_data['symbol'] = symbol
-        squeeze_data['weekly_change_pct'] = (
+        change_label = 'daily_change_pct' if timeframe == 'daily' else 'weekly_change_pct'
+        squeeze_data[change_label] = (
             (squeeze_data['current_price'] - squeeze_data['prev_close']) /
             squeeze_data['prev_close'] * 100
         ) if squeeze_data['prev_close'] > 0 else 0
@@ -723,10 +757,15 @@ def analyze_symbol(symbol: str, min_avg_volume: int = 500000) -> Optional[Dict]:
 # SCANNER
 # ============================================================================
 
-def scan_for_squeeze_fires(symbols: List[str], max_workers: int = 10) -> Tuple[List[Dict], List[Dict], List[Dict], List[Dict]]:
+def scan_for_squeeze_fires(symbols: List[str], max_workers: int = 10, timeframe: str = 'weekly') -> Tuple[List[Dict], List[Dict], List[Dict], List[Dict]]:
     """
-    Scan symbols for weekly squeeze fires.
-    
+    Scan symbols for squeeze fires.
+
+    Args:
+        symbols: List of ticker symbols
+        max_workers: Thread pool size
+        timeframe: 'weekly' or 'daily'
+
     Returns:
         fired_green: List of stocks where squeeze fired GREEN (bullish)
         fired_red: List of stocks where squeeze fired RED (bearish)
@@ -737,14 +776,15 @@ def scan_for_squeeze_fires(symbols: List[str], max_workers: int = 10) -> Tuple[L
     fired_red = []
     ready_to_fire = []
     in_squeeze = []
-    
+
     total = len(symbols)
     completed = 0
-    
-    print(f"\n🔍 Scanning {total} symbols for weekly squeeze fires...\n")
-    
+
+    tf_label = timeframe.upper()
+    print(f"\n🔍 Scanning {total} symbols for {tf_label} squeeze fires...\n")
+
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(analyze_symbol, sym): sym for sym in symbols}
+        futures = {executor.submit(analyze_symbol, sym, 500000, timeframe): sym for sym in symbols}
         
         for future in as_completed(futures):
             completed += 1
@@ -1039,7 +1079,11 @@ def print_single_stock_analysis(symbol: str, result: Dict, debug: bool = False):
             print(f"  ⚠️  DATA STALE! Last bar: {result.get('last_bar_date')} - Results may be outdated!")
     
     print(f"\n  Price:  ${result['current_price']:.2f}")
-    print(f"  Week:   {result['weekly_change_pct']:+.1f}%")
+    # Handle both daily and weekly change labels
+    if 'daily_change_pct' in result:
+        print(f"  Day:    {result['daily_change_pct']:+.1f}%")
+    elif 'weekly_change_pct' in result:
+        print(f"  Week:   {result['weekly_change_pct']:+.1f}%")
     
     # Squeeze status
     print(f"\n  {'─'*40}")
@@ -1148,21 +1192,26 @@ def main():
                         help='Skip Airtable sync')
     parser.add_argument('--tickers', nargs='+', type=str,
                         help='Specific tickers to scan (overrides universe)')
+    parser.add_argument('--daily', action='store_true',
+                        help='Run daily squeeze scan instead of weekly')
 
     args = parser.parse_args()
+
+    # Set timeframe
+    timeframe = 'daily' if args.daily else 'weekly'
     
     # Individual stock mode
     if args.stock:
         symbols = [s.upper() for s in args.stock]
         print(f"\n{'='*60}")
-        print(f"  INDIVIDUAL STOCK ANALYSIS")
+        print(f"  INDIVIDUAL STOCK ANALYSIS ({timeframe.upper()})")
         print(f"  Symbols: {', '.join(symbols)}")
         print(f"{'='*60}")
-        
+
         for symbol in symbols:
-            result = analyze_symbol(symbol)
+            result = analyze_symbol(symbol, timeframe=timeframe)
             print_single_stock_analysis(symbol, result, debug=args.debug)
-        
+
         return
     
     # Get symbols based on universe selection or --tickers flag
@@ -1185,14 +1234,15 @@ def main():
     # Remove duplicates
     symbols = list(set(symbols))
     
+    tf_label = "DAILY" if timeframe == 'daily' else "WEEKLY"
     print(f"\n{'='*70}")
-    print(f"  WEEKEND SQUEEZE SCANNER v2.0")
+    print(f"  SQUEEZE SCANNER v2.0 ({tf_label})")
     print(f"  Universe: {args.universe.upper()} ({len(symbols)} symbols)")
     print(f"{'='*70}")
-    
+
     # Run scanner
     fired_green, fired_red, ready_to_fire, in_squeeze = scan_for_squeeze_fires(
-        symbols, max_workers=args.workers
+        symbols, max_workers=args.workers, timeframe=timeframe
     )
     
     # Print results
