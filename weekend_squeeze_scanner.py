@@ -58,6 +58,9 @@ from urllib3.util.retry import Retry
 from datetime import datetime, date, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional, Tuple
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -246,6 +249,9 @@ def push_squeeze_signals_to_airtable(
             "52-week High %": sanitize_number(stock.get('high_52w_pct', 0)),
             "52-week Low %": sanitize_number(stock.get('low_52w_pct', 0)),
             "Short Interest %": sanitize_number(stock.get('short_pct', 0)),
+
+            # Clear daily overlay fields (daily scan will fill these in)
+            "Alignment": "",
         }
 
         # Only include Days To Earnings if known (avoid 0 = "earnings today")
@@ -307,6 +313,9 @@ def push_daily_squeeze_to_airtable(all_results: List[Dict]):
     Daily overlay: update existing Airtable records with daily squeeze fields.
     Only updates records that already exist (from the weekly scan).
     Never creates or deletes records.
+
+    Also computes cross-timeframe Alignment by comparing daily results
+    with the weekly Squeeze Status already stored in Airtable.
     """
     if not AT_API:
         print("⚠️  AT_API not set - Airtable sync skipped")
@@ -320,6 +329,7 @@ def push_daily_squeeze_to_airtable(all_results: List[Dict]):
     update_batch = []
     update_count = 0
     skip_count = 0
+    daily_fired_stocks = []  # Stocks with 🔥 DAILY FIRED alignment
 
     for result in all_results:
         sym = result['symbol'].upper()
@@ -338,11 +348,32 @@ def push_daily_squeeze_to_airtable(all_results: List[Dict]):
         else:
             daily_status = 'NONE'
 
+        # Cross-timeframe alignment: compare daily results with weekly status
+        weekly_status = existing[sym]["fields"].get("Squeeze Status", "")
+        weekly_coiled = weekly_status in ('READY', 'IN_SQUEEZE')
+
+        if daily_status == 'FIRED_GREEN' and weekly_coiled:
+            alignment = '\U0001f525 DAILY FIRED'
+            daily_fired_stocks.append({
+                'symbol': sym,
+                'current_price': result.get('current_price', 0),
+                'momentum': result.get('momentum', 0),
+                'momentum_accel': result.get('momentum_accel', 0),
+                'weekly_status': weekly_status,
+            })
+        elif weekly_status == 'READY' and result.get('momentum_accel', 0) > 0:
+            alignment = '\u26a1 ACCELERATING'
+        elif weekly_status == 'READY' and daily_status == 'READY':
+            alignment = '\u2705 DUAL READY'
+        else:
+            alignment = ''
+
         fields = {
             "Daily Squeeze Status": daily_status,
             "Daily Bars": sanitize_number(result.get('bars_in_squeeze', 0)),
             "Daily Momentum": sanitize_number(result.get('momentum', 0)),
             "Daily Accel": sanitize_number(result.get('momentum_accel', 0)),
+            "Alignment": alignment,
             "Last Updated": date.today().isoformat(),
         }
 
@@ -373,6 +404,7 @@ def push_daily_squeeze_to_airtable(all_results: List[Dict]):
                     "Daily Bars": 0,
                     "Daily Momentum": 0,
                     "Daily Accel": 0,
+                    "Alignment": "",
                     "Last Updated": date.today().isoformat(),
                 }
             })
@@ -386,6 +418,90 @@ def push_daily_squeeze_to_airtable(all_results: List[Dict]):
         none_count += len(none_batch)
 
     print(f"✅ Daily Airtable sync: {update_count} updated, {none_count} set to NONE, {skip_count} skipped (not in table)")
+
+    # Send daily alert email if any DAILY FIRED stocks found
+    if daily_fired_stocks:
+        print(f"\n\U0001f525 {len(daily_fired_stocks)} DAILY FIRED alerts!")
+        for s in daily_fired_stocks:
+            print(f"   {s['symbol']} — Weekly: {s['weekly_status']}, Mom: {s['momentum']:.2f}, Accel: {s['momentum_accel']:+.2f}")
+        send_daily_alert_email(daily_fired_stocks)
+
+
+def send_daily_alert_email(daily_fired_stocks: List[Dict]):
+    """
+    Send a short alert email when daily squeeze fires on weekly-coiled stocks.
+    Skips silently if Gmail env vars are not set.
+    """
+    gmail_user = os.environ.get('GMAIL_USER')
+    gmail_password = os.environ.get('GMAIL_APP_PASSWORD')
+    recipient = os.environ.get('EMAIL_RECIPIENT') or gmail_user
+
+    if not gmail_user or not gmail_password:
+        print("   (Gmail credentials not set — skipping daily alert email)")
+        return
+
+    today = date.today().strftime("%B %d, %Y")
+    count = len(daily_fired_stocks)
+    tickers_str = ", ".join(s['symbol'] for s in daily_fired_stocks)
+
+    subject = f"\u26a1 Daily Squeeze Alert - {tickers_str} fired ({today})"
+
+    # Build simple HTML table
+    rows = ""
+    for s in daily_fired_stocks:
+        rows += f"""
+        <tr>
+            <td style="padding: 10px; border-bottom: 1px solid #e5e5e5; font-weight: bold;">{s['symbol']}</td>
+            <td style="padding: 10px; border-bottom: 1px solid #e5e5e5; text-align: right;">${s['current_price']:.2f}</td>
+            <td style="padding: 10px; border-bottom: 1px solid #e5e5e5; text-align: right;">{s['momentum']:.2f}</td>
+            <td style="padding: 10px; border-bottom: 1px solid #e5e5e5; text-align: right;">{s['momentum_accel']:+.2f}</td>
+            <td style="padding: 10px; border-bottom: 1px solid #e5e5e5; text-align: center;">{s['weekly_status']}</td>
+        </tr>"""
+
+    html = f"""
+    <html>
+    <body style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+        <div style="background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%); color: white; padding: 20px; border-radius: 8px 8px 0 0;">
+            <h2 style="margin: 0;">\u26a1 Daily Squeeze Alert</h2>
+            <p style="margin: 5px 0 0 0; opacity: 0.9;">{today} &mdash; {count} stock{'s' if count != 1 else ''} fired</p>
+        </div>
+        <div style="background: #fffbeb; padding: 20px; border: 1px solid #e5e5e5; border-top: none;">
+            <p style="margin: 0 0 15px 0; color: #92400e;">
+                Daily squeeze fired GREEN while weekly squeeze is still coiled &mdash; potential early entry signal.
+            </p>
+            <table style="width: 100%; border-collapse: collapse; background: white; border-radius: 8px; overflow: hidden;">
+                <thead>
+                    <tr style="background: #374151; color: white;">
+                        <th style="padding: 10px; text-align: left;">Ticker</th>
+                        <th style="padding: 10px; text-align: right;">Price</th>
+                        <th style="padding: 10px; text-align: right;">Daily Mom</th>
+                        <th style="padding: 10px; text-align: right;">Accel</th>
+                        <th style="padding: 10px; text-align: center;">Weekly</th>
+                    </tr>
+                </thead>
+                <tbody>{rows}</tbody>
+            </table>
+        </div>
+        <div style="background: #f3f4f6; padding: 10px; border-radius: 0 0 8px 8px; border: 1px solid #e5e5e5; border-top: none;">
+            <p style="margin: 0; font-size: 11px; color: #6b7280;">Weekend Squeeze Scanner &bull; Daily Alert</p>
+        </div>
+    </body>
+    </html>
+    """
+
+    msg = MIMEMultipart('alternative')
+    msg['Subject'] = subject
+    msg['From'] = gmail_user
+    msg['To'] = recipient
+    msg.attach(MIMEText(html, 'html'))
+
+    try:
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
+            server.login(gmail_user, gmail_password)
+            server.sendmail(gmail_user, recipient, msg.as_string())
+        print(f"   \u2709\ufe0f  Daily alert email sent to {recipient}")
+    except Exception as e:
+        print(f"   \u26a0\ufe0f  Daily alert email failed: {e}")
 
 
 def _process_airtable_batch(batch: List[Dict], method: str):

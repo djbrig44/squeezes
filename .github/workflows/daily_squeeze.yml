@@ -29,4 +29,7 @@ jobs:
       - name: Run daily squeeze scan
         env:
           AT_API: ${{ secrets.AT_API }}
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          EMAIL_RECIPIENT: ${{ secrets.EMAIL_RECIPIENT }}
         run: python weekend_squeeze_scanner.py --timeframe daily
