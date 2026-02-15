@@ -223,14 +223,12 @@ def push_squeeze_signals_to_airtable(
         # Get sector (cached if possible)
         sector = get_sector(sym)
 
-        # Build fields matching Swing System structure
+        # Build fields matching Airtable Squeeze Signals table schema
         fields = {
             "Ticker": sym,
             "Sector": sector,
             "Final Signal": stock['signal'],
-            "Signal Strength": sanitize_number(stock.get('sunday_score', 0)),
             "Current Price": sanitize_number(stock.get('current_price', 0)),
-            "Last Updated": date.today().isoformat(),
 
             # Squeeze-specific fields
             "Squeeze Status": stock['squeeze_status'],
@@ -238,10 +236,6 @@ def push_squeeze_signals_to_airtable(
             "Momentum Accel": sanitize_number(stock.get('momentum_accel', 0)),
             "Bars in Squeeze": sanitize_number(stock.get('bars_in_squeeze', 0)),
             "Weekly Change Pct": sanitize_number(stock.get('weekly_change_pct', 0)) / 100,  # Convert to decimal for Airtable percent field
-            "Momentum Rising": bool(stock.get('momentum_rising', False)),
-            "Momentum Positive": bool(stock.get('momentum_positive', False)),
-
-            # Fire direction for squeeze fires
             "Fire Direction": stock.get('fire_direction', '') or '',
         }
 
