@@ -224,7 +224,7 @@ def run_scan_and_email(dry_run: bool = False, tickers: list = None):
 
     # Run scanner
     print("\n🔍 Running squeeze analysis...")
-    fired_green, fired_red, ready_to_fire, in_squeeze = scan_for_squeeze_fires(symbols)
+    fired_green, fired_red, ready_to_fire, in_squeeze = scan_for_squeeze_fires(symbols, timeframe='weekly')
 
     print(f"\n📈 Results:")
     print(f"   🟢 GREEN Fires: {len(fired_green)}")

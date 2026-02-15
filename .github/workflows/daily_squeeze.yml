@@ -1,0 +1,32 @@
+name: Daily Squeeze Scan
+
+on:
+  schedule:
+    # Mon-Fri after market close: 5pm PT = Tue-Sat 01:00 UTC
+    - cron: '0 1 * * 2-6'
+
+  # Allow manual trigger
+  workflow_dispatch:
+
+jobs:
+  daily-scan:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run daily squeeze scan
+        env:
+          AT_API: ${{ secrets.AT_API }}
+        run: python weekend_squeeze_scanner.py --timeframe daily

@@ -302,6 +302,92 @@ def push_squeeze_signals_to_airtable(
     print(f"✅ Airtable sync complete: {update_count} updates, {create_count} creates, {delete_count} stale deleted")
 
 
+def push_daily_squeeze_to_airtable(all_results: List[Dict]):
+    """
+    Daily overlay: update existing Airtable records with daily squeeze fields.
+    Only updates records that already exist (from the weekly scan).
+    Never creates or deletes records.
+    """
+    if not AT_API:
+        print("⚠️  AT_API not set - Airtable sync skipped")
+        return
+
+    print("\n📤 Pushing daily squeeze overlay to Airtable...")
+
+    existing = fetch_airtable_records()
+    print(f"   Found {len(existing)} existing records in Airtable")
+
+    update_batch = []
+    update_count = 0
+    skip_count = 0
+
+    for result in all_results:
+        sym = result['symbol'].upper()
+
+        if sym not in existing:
+            skip_count += 1
+            continue
+
+        # Determine daily squeeze status
+        if result.get('squeeze_fired'):
+            daily_status = 'FIRED_GREEN' if result.get('fire_direction') == 'GREEN' else 'FIRED_RED'
+        elif result.get('ready'):
+            daily_status = 'READY'
+        elif result.get('squeeze_on'):
+            daily_status = 'IN_SQUEEZE'
+        else:
+            daily_status = 'NONE'
+
+        fields = {
+            "Daily Squeeze Status": daily_status,
+            "Daily Bars": sanitize_number(result.get('bars_in_squeeze', 0)),
+            "Daily Momentum": sanitize_number(result.get('momentum', 0)),
+            "Daily Accel": sanitize_number(result.get('momentum_accel', 0)),
+            "Last Updated": date.today().isoformat(),
+        }
+
+        update_batch.append({
+            "id": existing[sym]["id"],
+            "fields": fields
+        })
+
+        if len(update_batch) >= AIRTABLE_BATCH_SIZE:
+            _process_airtable_batch(update_batch, "PATCH")
+            update_count += len(update_batch)
+            update_batch = []
+
+    if update_batch:
+        _process_airtable_batch(update_batch, "PATCH")
+        update_count += len(update_batch)
+
+    # Set remaining Airtable records (not in any daily category) to NONE
+    updated_tickers = {r['symbol'].upper() for r in all_results if r['symbol'].upper() in existing}
+    none_batch = []
+    none_count = 0
+    for ticker, rec in existing.items():
+        if ticker not in updated_tickers:
+            none_batch.append({
+                "id": rec["id"],
+                "fields": {
+                    "Daily Squeeze Status": "NONE",
+                    "Daily Bars": 0,
+                    "Daily Momentum": 0,
+                    "Daily Accel": 0,
+                    "Last Updated": date.today().isoformat(),
+                }
+            })
+            if len(none_batch) >= AIRTABLE_BATCH_SIZE:
+                _process_airtable_batch(none_batch, "PATCH")
+                none_count += len(none_batch)
+                none_batch = []
+
+    if none_batch:
+        _process_airtable_batch(none_batch, "PATCH")
+        none_count += len(none_batch)
+
+    print(f"✅ Daily Airtable sync: {update_count} updated, {none_count} set to NONE, {skip_count} skipped (not in table)")
+
+
 def _process_airtable_batch(batch: List[Dict], method: str):
     """Process a batch of Airtable records."""
     if not batch:
@@ -950,7 +1036,8 @@ def print_results(fired_green: List[Dict], fired_red: List[Dict],
         print(f"{'Symbol':<10} {'Price':>10} {'Wk Chg':>8} {'Momentum':>10} {'Mom Accel':>10} {'Bars':>6}")
         print("-" * 70)
         for stock in fired_green[:20]:
-            print(f"{stock['symbol']:<10} ${stock['current_price']:>8.2f} {stock['weekly_change_pct']:>+7.1f}% "
+            change_pct = stock.get('weekly_change_pct', stock.get('daily_change_pct', 0))
+            print(f"{stock['symbol']:<10} ${stock['current_price']:>8.2f} {change_pct:>+7.1f}% "
                   f"{stock['momentum']:>10.2f} {stock['momentum_accel']:>+10.2f} {stock['bars_in_squeeze']:>6}")
         if len(fired_green) > 20:
             print(f"  ... and {len(fired_green) - 20} more")
@@ -962,7 +1049,8 @@ def print_results(fired_green: List[Dict], fired_red: List[Dict],
         print(f"{'Symbol':<10} {'Price':>10} {'Wk Chg':>8} {'Momentum':>10} {'Mom Accel':>10} {'Bars':>6}")
         print("-" * 70)
         for stock in fired_red[:10]:
-            print(f"{stock['symbol']:<10} ${stock['current_price']:>8.2f} {stock['weekly_change_pct']:>+7.1f}% "
+            change_pct = stock.get('weekly_change_pct', stock.get('daily_change_pct', 0))
+            print(f"{stock['symbol']:<10} ${stock['current_price']:>8.2f} {change_pct:>+7.1f}% "
                   f"{stock['momentum']:>10.2f} {stock['momentum_accel']:>+10.2f} {stock['bars_in_squeeze']:>6}")
         if len(fired_red) > 10:
             print(f"  ... and {len(fired_red) - 10} more")
@@ -1051,7 +1139,8 @@ def calculate_sunday_score(stock: Dict) -> float:
     score += bars_score
     
     # Weekly confirmation (0-20 points)
-    weekly_score = min(abs(stock['weekly_change_pct']) / 10 * 20, 20)
+    change_pct = stock.get('weekly_change_pct', stock.get('daily_change_pct', 0))
+    weekly_score = min(abs(change_pct) / 10 * 20, 20)
     score += weekly_score
     
     return score
@@ -1087,10 +1176,11 @@ def print_sunday_rankings(fired_green: List[Dict], top_n: int = 15) -> List[Dict
         else:
             tier = "❄️"   # Cold
         
+        chg = stock.get('weekly_change_pct', stock.get('daily_change_pct', 0))
         print(f"{tier} {i:<4} {stock['symbol']:<8} {stock['sunday_score']:>8.1f} "
               f"${stock['current_price']:>8.2f} {stock['momentum']:>10.2f} "
               f"{stock['momentum_accel']:>+8.2f} {stock['bars_in_squeeze']:>6} "
-              f"{stock['weekly_change_pct']:>+7.1f}%")
+              f"{chg:>+7.1f}%")
     
     if len(ranked) > top_n:
         print(f"\n  ... and {len(ranked) - top_n} more")
@@ -1116,10 +1206,11 @@ def print_sunday_rankings(fired_green: List[Dict], top_n: int = 15) -> List[Dict
     
     for i, stock in enumerate(ranked[:3], 1):
         print(f"\n  {i}. {stock['symbol']} — Score: {stock['sunday_score']:.1f}")
-        print(f"     Price: ${stock['current_price']:.2f} | Week: {stock['weekly_change_pct']:+.1f}%")
+        chg = stock.get('weekly_change_pct', stock.get('daily_change_pct', 0))
+        print(f"     Price: ${stock['current_price']:.2f} | Change: {chg:+.1f}%")
         print(f"     Momentum: {stock['momentum']:.2f} | Accel: {stock['momentum_accel']:+.2f}")
         print(f"     Squeeze Duration: {stock['bars_in_squeeze']} bars")
-        
+
         # Quick analysis
         strengths = []
         if stock['momentum'] > 20:
@@ -1128,8 +1219,8 @@ def print_sunday_rankings(fired_green: List[Dict], top_n: int = 15) -> List[Dict
             strengths.append("Accelerating")
         if stock['bars_in_squeeze'] >= 10:
             strengths.append("Long squeeze")
-        if stock['weekly_change_pct'] > 5:
-            strengths.append("Big weekly move")
+        if chg > 5:
+            strengths.append("Big move")
         if stock['momentum_rising']:
             strengths.append("Rising")
         
@@ -1148,8 +1239,9 @@ def save_sunday_rankings(ranked: List[Dict], filename: str = None):
     
     if ranked:
         df = pd.DataFrame(ranked)
-        cols = ['symbol', 'sunday_score', 'current_price', 'weekly_change_pct',
-                'momentum', 'momentum_accel', 'bars_in_squeeze', 
+        cols = ['symbol', 'sunday_score', 'current_price',
+                'weekly_change_pct', 'daily_change_pct',
+                'momentum', 'momentum_accel', 'bars_in_squeeze',
                 'momentum_rising', 'momentum_positive']
         df = df[[c for c in cols if c in df.columns]]
         df = df.sort_values('sunday_score', ascending=False)
@@ -1226,13 +1318,14 @@ def print_single_stock_analysis(symbol: str, result: Dict, debug: bool = False):
         mom_score = min(abs(result['momentum']) / 30 * 40, 40)
         accel_score = min(max(result['momentum_accel'], 0) / 5 * 20, 20)
         bars_score = min(result['bars_in_squeeze'] / 12 * 20, 20)
-        weekly_score = min(abs(result['weekly_change_pct']) / 10 * 20, 20)
+        chg = result.get('weekly_change_pct', result.get('daily_change_pct', 0))
+        weekly_score = min(abs(chg) / 10 * 20, 20)
         sunday_score = mom_score + accel_score + bars_score + weekly_score
-        
+
         print(f"\n  {'─'*40}")
         print(f"  SUNDAY SCORE: {sunday_score:.1f}/100")
         print(f"  {'─'*40}")
-        
+
         if sunday_score >= 70:
             print(f"  🔥 HOT — Strong candidate for Monday")
         elif sunday_score >= 50:
@@ -1241,7 +1334,7 @@ def print_single_stock_analysis(symbol: str, result: Dict, debug: bool = False):
             print(f"  ⚠️  OKAY — Proceed with caution")
         else:
             print(f"  ❄️  COLD — Weak setup")
-        
+
         # Strengths
         strengths = []
         if result['momentum'] > 20:
@@ -1250,8 +1343,8 @@ def print_single_stock_analysis(symbol: str, result: Dict, debug: bool = False):
             strengths.append("Accelerating")
         if result['bars_in_squeeze'] >= 10:
             strengths.append("Long squeeze duration")
-        if result['weekly_change_pct'] > 5:
-            strengths.append("Big weekly move")
+        if chg > 5:
+            strengths.append("Big move")
         if result['momentum_rising']:
             strengths.append("Rising momentum")
         
@@ -1302,13 +1395,14 @@ def main():
                         help='Skip Airtable sync')
     parser.add_argument('--tickers', nargs='+', type=str,
                         help='Specific tickers to scan (overrides universe)')
-    parser.add_argument('--daily', action='store_true',
-                        help='Run daily squeeze scan instead of weekly')
+    parser.add_argument('--timeframe', type=str, default='weekly',
+                        choices=['weekly', 'daily'],
+                        help='Timeframe for squeeze scan (default: weekly)')
 
     args = parser.parse_args()
 
     # Set timeframe
-    timeframe = 'daily' if args.daily else 'weekly'
+    timeframe = args.timeframe
     
     # Individual stock mode
     if args.stock:
@@ -1373,7 +1467,13 @@ def main():
 
     # Push to Airtable (unless --no-airtable flag)
     if not args.no_airtable:
-        push_squeeze_signals_to_airtable(fired_green, fired_red, ready_to_fire, in_squeeze)
+        if timeframe == 'daily':
+            # Daily: update-only (no creates, no deletes)
+            all_results = fired_green + fired_red + ready_to_fire + in_squeeze
+            push_daily_squeeze_to_airtable(all_results)
+        else:
+            # Weekly: full sync (create, update, delete)
+            push_squeeze_signals_to_airtable(fired_green, fired_red, ready_to_fire, in_squeeze)
     else:
         print("\n📡 Airtable sync skipped (--no-airtable flag)")
 
