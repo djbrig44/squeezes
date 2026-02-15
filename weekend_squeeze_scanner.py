@@ -560,40 +560,41 @@ def calculate_weekly_squeeze(df: pd.DataFrame,
     
     momentum = deviation.rolling(mom_length).apply(linreg_value, raw=True)
     
-    # Current values
-    current_meaningful = meaningful_squeeze.iloc[-1] if len(meaningful_squeeze) > 0 else False
-    prev_meaningful = meaningful_squeeze.iloc[-2] if len(meaningful_squeeze) > 1 else False
+    # Current values — use standard squeeze (1.5x KC) for fire detection to match TOS
     current_squeeze = squeeze_on.iloc[-1] if len(squeeze_on) > 0 else False
     prev_squeeze = squeeze_on.iloc[-2] if len(squeeze_on) > 1 else False
+    current_meaningful = meaningful_squeeze.iloc[-1] if len(meaningful_squeeze) > 0 else False
+    prev_meaningful = meaningful_squeeze.iloc[-2] if len(meaningful_squeeze) > 1 else False
     current_mom = momentum.iloc[-1] if len(momentum) > 0 else 0
     prev_mom = momentum.iloc[-2] if len(momentum) > 1 else 0
 
-    # Count bars in MEANINGFUL squeeze (Mid + High only)
-    bars_in_meaningful_squeeze = 0
-    for i in range(1, min(50, len(meaningful_squeeze))):
-        if meaningful_squeeze.iloc[-i]:
-            bars_in_meaningful_squeeze += 1
+    # Count bars in standard squeeze (1.5x KC — matches TOS TTM Squeeze)
+    # When squeeze just ended (fired), current bar is NOT in squeeze,
+    # so start counting from the previous bar (iloc[-2]) which was last in squeeze.
+    # When still in squeeze, start counting from current bar (iloc[-1]).
+    squeeze_just_ended = prev_squeeze and not current_squeeze
+    count_start = 2 if squeeze_just_ended else 1
+    bars_in_squeeze = 0
+    for i in range(count_start, min(50, len(squeeze_on))):
+        if squeeze_on.iloc[-i]:
+            bars_in_squeeze += 1
         else:
             break
 
-    # Squeeze fired = was in MEANINGFUL squeeze, now NOT in meaningful squeeze
-    # AND had at least 6 bars in meaningful squeeze (like TOS minSqueezeBars)
-    meaningful_squeeze_ended = prev_meaningful and not current_meaningful
-    squeeze_fired = meaningful_squeeze_ended and bars_in_meaningful_squeeze >= 6
-
-    # Count bars for display (use meaningful squeeze count)
-    bars_in_squeeze = bars_in_meaningful_squeeze
+    # Squeeze fired = was in squeeze (1.5x KC), now NOT in squeeze
+    # AND had at least 6 bars in squeeze
+    squeeze_fired = squeeze_just_ended and bars_in_squeeze >= 6
 
     # Fire direction (only if squeeze actually fired)
     fire_direction = None
     if squeeze_fired:
         fire_direction = 'GREEN' if current_mom > 0 else 'RED'
-    
+
     # Momentum acceleration
     mom_accel = current_mom - prev_mom if not pd.isna(prev_mom) else 0
 
-    # Ready = currently in MEANINGFUL squeeze with 6+ bars
-    ready = current_meaningful and bars_in_meaningful_squeeze >= 6
+    # Ready = currently in squeeze with 6+ bars
+    ready = current_squeeze and bars_in_squeeze >= 6
 
     # Squeeze state for display
     if squeeze_high.iloc[-1]:
@@ -606,7 +607,8 @@ def calculate_weekly_squeeze(df: pd.DataFrame,
         squeeze_state = 'NONE'
     
     # Get last 10 bars of squeeze status for debugging
-    squeeze_history = squeeze_on.tail(10).tolist()
+    squeeze_history = squeeze_on.tail(10).tolist()  # Low squeeze (any)
+    meaningful_history = meaningful_squeeze.tail(10).tolist()  # Mid+High only
     bar_dates = [str(d.date()) for d in df.index[-10:]]
     
     # Check if data is stale (most recent bar is more than 10 days old)
@@ -615,8 +617,8 @@ def calculate_weekly_squeeze(df: pd.DataFrame,
     data_stale = days_old > 10
     
     return {
-        'squeeze_on': bool(current_meaningful),  # Now tracks meaningful squeeze
-        'prev_squeeze': bool(prev_meaningful),
+        'squeeze_on': bool(current_squeeze),  # Standard squeeze (1.5x KC, matches TOS)
+        'prev_squeeze': bool(prev_squeeze),
         'squeeze_fired': bool(squeeze_fired),
         'fire_direction': fire_direction,
         'momentum': float(current_mom) if not pd.isna(current_mom) else 0,
@@ -628,6 +630,7 @@ def calculate_weekly_squeeze(df: pd.DataFrame,
         'current_price': float(close.iloc[-1]),
         'prev_close': float(close.iloc[-2]) if len(close) > 1 else 0,
         'squeeze_history': squeeze_history,
+        'meaningful_history': meaningful_history,
         'bar_dates': bar_dates,
         'data_stale': data_stale,
         'last_bar_date': str(last_bar_date),
@@ -1073,8 +1076,10 @@ def print_single_stock_analysis(symbol: str, result: Dict, debug: bool = False):
         print(f"  prev_squeeze: {result.get('prev_squeeze', 'N/A')}")
         print(f"  bars_in_squeeze: {result.get('bars_in_squeeze')}")
         if 'squeeze_history' in result:
-            print(f"  Last 10 bars squeeze (oldest->newest): {result['squeeze_history']}")
-            print(f"  Bar dates: {result['bar_dates']}")
+            print(f"  Low squeeze  (any):     {result['squeeze_history']}")
+            print(f"  Mid+High squeeze (fire): {result.get('meaningful_history', 'N/A')}")
+            print(f"  Squeeze state:           {result.get('squeeze_state', 'N/A')}")
+            print(f"  Bar dates:               {result['bar_dates']}")
         if result.get('data_stale'):
             print(f"  ⚠️  DATA STALE! Last bar: {result.get('last_bar_date')} - Results may be outdated!")
     
@@ -1209,7 +1214,7 @@ def main():
         print(f"{'='*60}")
 
         for symbol in symbols:
-            result = analyze_symbol(symbol, timeframe=timeframe)
+            result = analyze_symbol(symbol, min_avg_volume=0, timeframe=timeframe)
             print_single_stock_analysis(symbol, result, debug=args.debug)
 
         return
