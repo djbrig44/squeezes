@@ -220,13 +220,10 @@ def push_squeeze_signals_to_airtable(
         if 'sunday_score' not in stock:
             stock['sunday_score'] = calculate_sunday_score(stock)
 
-        # Get sector (cached if possible)
-        sector = get_sector(sym)
-
         # Build fields matching Airtable Squeeze Signals table schema
         fields = {
             "Ticker": sym,
-            "Sector": sector,
+            "Sector": stock.get('sector', 'Unknown'),
             "Final Signal": stock['signal'],
             "Current Price": sanitize_number(stock.get('current_price', 0)),
             "Last Updated": date.today().isoformat(),
@@ -788,8 +785,9 @@ def analyze_symbol(symbol: str, min_avg_volume: int = 500000, timeframe: str = '
         squeeze_data['avg_volume'] = avg_volume
         squeeze_data['timeframe'] = timeframe
 
-        # Add symbol and price info
+        # Add symbol, sector, and price info
         squeeze_data['symbol'] = symbol
+        squeeze_data['sector'] = info.get('sector') or info.get('category') or 'Unknown'
         change_label = 'daily_change_pct' if timeframe == 'daily' else 'weekly_change_pct'
         squeeze_data[change_label] = (
             (squeeze_data['current_price'] - squeeze_data['prev_close']) /
