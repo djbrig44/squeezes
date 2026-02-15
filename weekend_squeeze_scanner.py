@@ -229,7 +229,7 @@ def push_squeeze_signals_to_airtable(
             "Sector": sector,
             "Final Signal": stock['signal'],
             "Current Price": sanitize_number(stock.get('current_price', 0)),
-            "Last Updated": datetime.now().isoformat(),
+            "Last Updated": date.today().isoformat(),
 
             # Squeeze-specific fields
             "Squeeze Status": stock['squeeze_status'],
