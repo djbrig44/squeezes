@@ -229,15 +229,31 @@ def push_squeeze_signals_to_airtable(
             "Sector": sector,
             "Final Signal": stock['signal'],
             "Current Price": sanitize_number(stock.get('current_price', 0)),
+            "Last Updated": datetime.now().isoformat(),
 
             # Squeeze-specific fields
             "Squeeze Status": stock['squeeze_status'],
             "Momentum": sanitize_number(stock.get('momentum', 0)),
             "Momentum Accel": sanitize_number(stock.get('momentum_accel', 0)),
             "Bars in Squeeze": sanitize_number(stock.get('bars_in_squeeze', 0)),
-            "Weekly Change Pct": sanitize_number(stock.get('weekly_change_pct', 0)) / 100,  # Convert to decimal for Airtable percent field
+            "Weekly Change Pct": sanitize_number(stock.get('weekly_change_pct', 0)) / 100,
             "Fire Direction": stock.get('fire_direction', '') or '',
+
+            # Risk / position sizing
+            "ATR %": sanitize_number(stock.get('atr_pct', 0)),
+            "Stop Loss": sanitize_number(stock.get('stop_loss', 0)),
+            "Target Price": sanitize_number(stock.get('target_price', 0)),
+
+            # Context
+            "Relative Volume": sanitize_number(stock.get('relative_volume', 0)),
+            "52-week High %": sanitize_number(stock.get('high_52w_pct', 0)),
+            "52-week Low %": sanitize_number(stock.get('low_52w_pct', 0)),
+            "Short Interest %": sanitize_number(stock.get('short_pct', 0)),
         }
+
+        # Only include Days To Earnings if known (avoid 0 = "earnings today")
+        if stock.get('days_to_earnings') is not None:
+            fields["Days To Earnings"] = stock['days_to_earnings']
 
         # Add to appropriate batch
         if sym in existing:
@@ -737,7 +753,6 @@ def analyze_symbol(symbol: str, min_avg_volume: int = 500000, timeframe: str = '
     time.sleep(random.uniform(0.05, 0.15))
 
     try:
-        # Check volume before fetching full data
         ticker = yf.Ticker(symbol)
         info = ticker.info
         avg_volume = info.get('averageVolume', 0) or 0
@@ -745,16 +760,27 @@ def analyze_symbol(symbol: str, min_avg_volume: int = 500000, timeframe: str = '
         if avg_volume < min_avg_volume:
             return None  # Skip low-volume stocks
 
-        # Fetch data based on timeframe
-        if timeframe == 'daily':
-            df = fetch_daily_data(symbol)
-        else:
-            df = fetch_weekly_data(symbol)
+        # Fetch daily data (single API call — reuse ticker object)
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=52 * 7 + 30)
+        daily_df = ticker.history(start=start_date, end=end_date, interval='1d')
 
-        if df is None:
+        if daily_df is None or daily_df.empty or len(daily_df) < 20:
             return None
 
-        squeeze_data = calculate_weekly_squeeze(df)  # Same calc works for both
+        # Build analysis dataframe
+        if timeframe == 'weekly':
+            df = daily_df.resample('W-FRI').agg({
+                'Open': 'first', 'High': 'max', 'Low': 'min',
+                'Close': 'last', 'Volume': 'sum'
+            }).dropna()
+        else:
+            df = daily_df
+
+        if len(df) < 20:
+            return None
+
+        squeeze_data = calculate_weekly_squeeze(df)
         if squeeze_data is None:
             return None
 
@@ -769,6 +795,50 @@ def analyze_symbol(symbol: str, min_avg_volume: int = 500000, timeframe: str = '
             (squeeze_data['current_price'] - squeeze_data['prev_close']) /
             squeeze_data['prev_close'] * 100
         ) if squeeze_data['prev_close'] > 0 else 0
+
+        # === Extra metrics (computed from daily data + info) ===
+        current_price = squeeze_data['current_price']
+
+        # Daily ATR (14-period)
+        d_tr = pd.concat([
+            daily_df['High'] - daily_df['Low'],
+            (daily_df['High'] - daily_df['Close'].shift(1)).abs(),
+            (daily_df['Low'] - daily_df['Close'].shift(1)).abs()
+        ], axis=1).max(axis=1)
+        daily_atr = float(d_tr.ewm(span=14, adjust=False).mean().iloc[-1])
+
+        squeeze_data['atr_pct'] = daily_atr / current_price if current_price > 0 else 0
+        squeeze_data['stop_loss'] = current_price - (2 * daily_atr)
+        squeeze_data['target_price'] = current_price + (3 * daily_atr)
+
+        # Relative volume (latest day vs 20-day avg)
+        avg_vol_20 = float(daily_df['Volume'].tail(20).mean())
+        latest_vol = float(daily_df['Volume'].iloc[-1])
+        squeeze_data['relative_volume'] = latest_vol / avg_vol_20 if avg_vol_20 > 0 else 0
+
+        # 52-week high/low distance (as decimals: -0.10 = 10% below high)
+        w52_high = info.get('fiftyTwoWeekHigh', 0) or 0
+        w52_low = info.get('fiftyTwoWeekLow', 0) or 0
+        squeeze_data['high_52w_pct'] = (current_price / w52_high - 1) if w52_high > 0 else 0
+        squeeze_data['low_52w_pct'] = (current_price / w52_low - 1) if w52_low > 0 else 0
+
+        # Short interest (yfinance returns as decimal, e.g. 0.05 = 5%)
+        squeeze_data['short_pct'] = info.get('shortPercentOfFloat', 0) or 0
+
+        # Days to earnings
+        squeeze_data['days_to_earnings'] = None
+        try:
+            cal = ticker.calendar
+            if cal is not None and isinstance(cal, dict):
+                earnings_dates = cal.get('Earnings Date', [])
+                today = datetime.now().date()
+                for ed in earnings_dates:
+                    ed_date = ed.date() if hasattr(ed, 'date') else ed
+                    if isinstance(ed_date, date) and ed_date >= today:
+                        squeeze_data['days_to_earnings'] = (ed_date - today).days
+                        break
+        except Exception:
+            pass
 
         return squeeze_data
     except Exception as e:
