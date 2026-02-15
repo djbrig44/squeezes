@@ -585,6 +585,18 @@ def calculate_weekly_squeeze(df: pd.DataFrame,
     # AND had at least 6 bars in squeeze
     squeeze_fired = squeeze_just_ended and bars_in_squeeze >= 6
 
+    # Freshness check: only report fires where the meaningful (mid+high)
+    # squeeze ended within the last bar. If only the wide/low squeeze was
+    # lingering after the real compression ended, it's a stale signal.
+    if squeeze_fired:
+        bars_since_meaningful = 0
+        for i in range(1, min(50, len(meaningful_squeeze))):
+            if meaningful_squeeze.iloc[-i]:
+                break
+            bars_since_meaningful += 1
+        if bars_since_meaningful > 1:
+            squeeze_fired = False  # Stale — meaningful squeeze ended 2+ bars ago
+
     # Fire direction (only if squeeze actually fired)
     fire_direction = None
     if squeeze_fired:
