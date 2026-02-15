@@ -281,7 +281,25 @@ def push_squeeze_signals_to_airtable(
         _process_airtable_batch(create_batch, "POST")
         create_count += len(create_batch)
 
-    print(f"✅ Airtable sync complete: {update_count} updates, {create_count} creates")
+    # Delete stale records (tickers no longer in any squeeze category)
+    current_tickers = {stock['symbol'].upper() for stock in all_signals}
+    stale = [rec for ticker, rec in existing.items() if ticker not in current_tickers]
+    delete_count = 0
+
+    for i in range(0, len(stale), AIRTABLE_BATCH_SIZE):
+        batch_ids = [rec["id"] for rec in stale[i:i + AIRTABLE_BATCH_SIZE]]
+        try:
+            url = f"https://api.airtable.com/v0/{AT_BASE}/{urllib.parse.quote(AT_TABLE)}"
+            params = [("records[]", rid) for rid in batch_ids]
+            resp = session.delete(url, headers=AT_HEADERS, params=params, timeout=30)
+            if resp.status_code == 200:
+                delete_count += len(batch_ids)
+            else:
+                print(f"   ⚠️  Airtable DELETE failed: {resp.status_code} - {resp.text[:200]}")
+        except Exception as e:
+            print(f"   ⚠️  Airtable DELETE error: {e}")
+
+    print(f"✅ Airtable sync complete: {update_count} updates, {create_count} creates, {delete_count} stale deleted")
 
 
 def _process_airtable_batch(batch: List[Dict], method: str):
