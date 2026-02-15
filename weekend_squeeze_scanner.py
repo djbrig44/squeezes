@@ -185,15 +185,28 @@ def push_squeeze_signals_to_airtable(
     existing = fetch_airtable_records()
     print(f"   Found {len(existing)} existing records in Airtable")
 
-    # Only push GREEN fires to Airtable (bullish squeeze breakouts)
+    # Tag each category with squeeze status and signal
     all_signals = []
+
+    for stock in ready_to_fire:
+        stock['squeeze_status'] = 'READY'
+        stock['signal'] = 'WATCH'
+        all_signals.append(stock)
+
+    for stock in in_squeeze:
+        stock['squeeze_status'] = 'IN_SQUEEZE'
+        stock['signal'] = 'BUILDING'
+        all_signals.append(stock)
 
     for stock in fired_green:
         stock['squeeze_status'] = 'FIRED_GREEN'
         stock['signal'] = 'BUY'
         all_signals.append(stock)
 
-    # Skip FIRED_RED, READY, and IN_SQUEEZE - only GREEN fires are actionable
+    for stock in fired_red:
+        stock['squeeze_status'] = 'FIRED_RED'
+        stock['signal'] = 'AVOID'
+        all_signals.append(stock)
 
     update_batch = []
     create_batch = []
@@ -226,7 +239,7 @@ def push_squeeze_signals_to_airtable(
             "Bars in Squeeze": sanitize_number(stock.get('bars_in_squeeze', 0)),
             "Weekly Change Pct": sanitize_number(stock.get('weekly_change_pct', 0)) / 100,  # Convert to decimal for Airtable percent field
             "Momentum Rising": bool(stock.get('momentum_rising', False)),
-            "Momentum Positive\t": bool(stock.get('momentum_positive', False)),
+            "Momentum Positive": bool(stock.get('momentum_positive', False)),
 
             # Fire direction for squeeze fires
             "Fire Direction": stock.get('fire_direction', '') or '',
