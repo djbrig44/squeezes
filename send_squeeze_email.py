@@ -35,111 +35,227 @@ from weekend_squeeze_scanner import (
     scan_for_squeeze_fires,
     calculate_sunday_score,
     push_squeeze_signals_to_airtable,
+    fetch_airtable_records,
 )
 
 
-def format_squeeze_email(fired_green: list) -> tuple:
-    """
-    Format GREEN fire results into an HTML email.
-    Returns (subject, html_body).
-    """
-    today = date.today().strftime("%B %d, %Y")
-
-    subject = f"🟢 Weekend Squeeze Report - {len(fired_green)} GREEN Fires ({today})"
-
-    if not fired_green:
-        html = f"""
-        <html>
-        <body style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-            <h2 style="color: #333;">Weekend Squeeze Scanner</h2>
-            <p style="color: #666;">{today}</p>
-            <div style="background: #f5f5f5; padding: 20px; border-radius: 8px;">
-                <p style="color: #888;">No GREEN fires detected this weekend.</p>
-                <p style="color: #888; font-size: 12px;">The scanner found no stocks where the weekly TTM Squeeze fired bullish.</p>
-            </div>
-        </body>
-        </html>
-        """
-        return subject, html
-
-    # Sort by sunday_score descending
-    sorted_stocks = sorted(fired_green, key=lambda x: x.get('sunday_score', 0), reverse=True)
-
-    # Build table rows
-    rows_html = ""
-    for i, stock in enumerate(sorted_stocks, 1):
+def _build_fire_table(stocks: list, color: str, change_key: str = 'weekly_change_pct') -> str:
+    """Build an HTML table for fired stocks (GREEN or RED)."""
+    if not stocks:
+        return ""
+    rows = ""
+    for stock in stocks:
         symbol = stock['symbol']
-        score = stock.get('sunday_score', 0)
         price = stock.get('current_price', 0)
         momentum = stock.get('momentum', 0)
-        weekly_change = stock.get('weekly_change_pct', 0)
+        change = stock.get(change_key, 0)
         bars = stock.get('bars_in_squeeze', 0)
+        score = stock.get('sunday_score', 0)
+        change_color = "#22c55e" if change >= 0 else "#ef4444"
+        rows += f"""
+        <tr>
+            <td style="padding: 10px; border-bottom: 1px solid #e5e5e5; font-weight: bold;">{symbol}</td>
+            <td style="padding: 10px; border-bottom: 1px solid #e5e5e5; text-align: right;">${price:.2f}</td>
+            <td style="padding: 10px; border-bottom: 1px solid #e5e5e5; text-align: right; color: {change_color};">{change:+.1f}%</td>
+            <td style="padding: 10px; border-bottom: 1px solid #e5e5e5; text-align: right;">{momentum:.2f}</td>
+            <td style="padding: 10px; border-bottom: 1px solid #e5e5e5; text-align: center;">{bars}</td>
+        </tr>"""
+    header_bg = "#16a34a" if color == "green" else "#dc2626"
+    return f"""
+    <table style="width: 100%; border-collapse: collapse; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-bottom: 10px;">
+        <thead><tr style="background: {header_bg}; color: white;">
+            <th style="padding: 10px; text-align: left;">Ticker</th>
+            <th style="padding: 10px; text-align: right;">Price</th>
+            <th style="padding: 10px; text-align: right;">Week %</th>
+            <th style="padding: 10px; text-align: right;">Momentum</th>
+            <th style="padding: 10px; text-align: center;">Bars</th>
+        </tr></thead>
+        <tbody>{rows}</tbody>
+    </table>"""
 
-        # Color code by score
-        if score >= 80:
-            score_color = "#22c55e"  # green
-            row_bg = "#f0fdf4"
-        elif score >= 60:
-            score_color = "#84cc16"  # lime
-            row_bg = "#fefce8"
-        else:
-            score_color = "#facc15"  # yellow
-            row_bg = "#fffbeb"
 
-        change_color = "#22c55e" if weekly_change >= 0 else "#ef4444"
+def _format_daily_status(daily_fields: dict) -> str:
+    """Format daily overlay data into a compact status string for the email."""
+    if not daily_fields:
+        return '<span style="color: #9ca3af;">&mdash;</span>'
+    status = daily_fields.get('Daily Squeeze Status', '')
+    bars = int(daily_fields.get('Daily Bars', 0))
+    alignment = daily_fields.get('Alignment', '')
+    if alignment and 'DAILY FIRED' in alignment:
+        return '<span style="color: #22c55e; font-weight: bold;">FIRED</span>'
+    if status == 'FIRED_GREEN':
+        return '<span style="color: #22c55e; font-weight: bold;">FIRED</span>'
+    if status == 'FIRED_RED':
+        return '<span style="color: #ef4444; font-weight: bold;">FIRED</span>'
+    if status == 'READY':
+        return f'<span style="color: #f59e0b;">Ready ({bars}b)</span>'
+    if status == 'IN_SQUEEZE':
+        return f'<span style="color: #3b82f6;">In Sq ({bars}b)</span>'
+    return '<span style="color: #9ca3af;">&mdash;</span>'
 
-        rows_html += f"""
-        <tr style="background: {row_bg};">
-            <td style="padding: 12px; border-bottom: 1px solid #e5e5e5; font-weight: bold;">{symbol}</td>
-            <td style="padding: 12px; border-bottom: 1px solid #e5e5e5; text-align: right;">${price:.2f}</td>
-            <td style="padding: 12px; border-bottom: 1px solid #e5e5e5; text-align: right; color: {change_color};">{weekly_change:+.1f}%</td>
-            <td style="padding: 12px; border-bottom: 1px solid #e5e5e5; text-align: center; color: {score_color}; font-weight: bold;">{score:.0f}</td>
-            <td style="padding: 12px; border-bottom: 1px solid #e5e5e5; text-align: right;">{momentum:.2f}</td>
-            <td style="padding: 12px; border-bottom: 1px solid #e5e5e5; text-align: center;">{bars}</td>
-        </tr>
-        """
+
+def _build_ready_table(stocks: list, limit: int, daily_overlay: dict = None) -> str:
+    """Build an HTML table for ready-to-fire or in-squeeze stocks."""
+    if not stocks:
+        return ""
+    daily_overlay = daily_overlay or {}
+    display = stocks[:limit]
+    rows = ""
+    for stock in display:
+        symbol = stock['symbol']
+        price = stock.get('current_price', 0)
+        kc = stock.get('squeeze_state', '?')
+        bars = stock.get('bars_in_squeeze', 0)
+        momentum = stock.get('momentum', 0)
+        rising = stock.get('momentum_rising', False)
+        mom_sign = "+" if momentum > 0 else ""
+        rising_icon = "^" if rising else "v"
+        daily_fields = daily_overlay.get(symbol.upper(), {}).get('fields', {})
+        daily_html = _format_daily_status(daily_fields)
+        rows += f"""
+        <tr>
+            <td style="padding: 8px; border-bottom: 1px solid #e5e5e5; font-weight: bold;">{symbol}</td>
+            <td style="padding: 8px; border-bottom: 1px solid #e5e5e5; text-align: right;">${price:.2f}</td>
+            <td style="padding: 8px; border-bottom: 1px solid #e5e5e5; text-align: center;">{kc}</td>
+            <td style="padding: 8px; border-bottom: 1px solid #e5e5e5; text-align: center;">{bars}</td>
+            <td style="padding: 8px; border-bottom: 1px solid #e5e5e5; text-align: right;">{mom_sign}{momentum:.2f} {rising_icon}</td>
+            <td style="padding: 8px; border-bottom: 1px solid #e5e5e5; text-align: center;">{daily_html}</td>
+        </tr>"""
+    overflow = len(stocks) - limit
+    if overflow > 0:
+        rows += f"""
+        <tr><td colspan="6" style="padding: 8px; text-align: center; color: #6b7280; font-size: 12px;">
+            +{overflow} more in Airtable
+        </td></tr>"""
+    return f"""
+    <table style="width: 100%; border-collapse: collapse; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-bottom: 10px;">
+        <thead><tr style="background: #374151; color: white;">
+            <th style="padding: 8px; text-align: left;">Ticker</th>
+            <th style="padding: 8px; text-align: right;">Price</th>
+            <th style="padding: 8px; text-align: center;">KC</th>
+            <th style="padding: 8px; text-align: center;">Wk Bars</th>
+            <th style="padding: 8px; text-align: right;">Momentum</th>
+            <th style="padding: 8px; text-align: center;">Daily</th>
+        </tr></thead>
+        <tbody>{rows}</tbody>
+    </table>"""
+
+
+def format_squeeze_email(fired_green: list, fired_red: list = None,
+                         ready_to_fire: list = None, in_squeeze: list = None,
+                         scan_stats: dict = None, daily_overlay: dict = None) -> tuple:
+    """
+    Format full weekend squeeze report into an HTML email.
+    Returns (subject, html_body).
+    """
+    fired_red = fired_red or []
+    ready_to_fire = ready_to_fire or []
+    in_squeeze = in_squeeze or []
+    scan_stats = scan_stats or {}
+    daily_overlay = daily_overlay or {}
+    today = date.today().strftime("%B %d, %Y")
+
+    total_fires = len(fired_green) + len(fired_red)
+    subject = f"Weekend Squeeze Report - {total_fires} Fires, {len(ready_to_fire)} Ready, {len(in_squeeze)} Building ({today})"
+
+    # Split ready_to_fire by KC level
+    ready_high = [s for s in ready_to_fire if s.get('squeeze_state') in ('HIGH', 'MID')]
+    ready_low = [s for s in ready_to_fire if s.get('squeeze_state') not in ('HIGH', 'MID')]
+    # Sort each by bars descending
+    ready_high.sort(key=lambda x: x.get('bars_in_squeeze', 0), reverse=True)
+    ready_low.sort(key=lambda x: x.get('bars_in_squeeze', 0), reverse=True)
+
+    # Split in_squeeze by KC level
+    squeeze_deep = [s for s in in_squeeze if s.get('squeeze_state') in ('HIGH', 'MID')]
+    squeeze_deep.sort(key=lambda x: x.get('bars_in_squeeze', 0), reverse=True)
+
+    # --- Summary banner ---
+    summary_html = f"""
+    <div style="background: #1e293b; color: white; padding: 20px; border-radius: 8px 8px 0 0;">
+        <h2 style="margin: 0;">Weekend Squeeze Report</h2>
+        <p style="margin: 5px 0 0 0; opacity: 0.9;">{today}</p>
+        <div style="margin-top: 15px; display: flex; gap: 20px; flex-wrap: wrap;">
+            <span style="background: rgba(255,255,255,0.15); padding: 6px 12px; border-radius: 4px;">
+                GREEN: <strong>{len(fired_green)}</strong></span>
+            <span style="background: rgba(255,255,255,0.15); padding: 6px 12px; border-radius: 4px;">
+                RED: <strong>{len(fired_red)}</strong></span>
+            <span style="background: rgba(255,255,255,0.15); padding: 6px 12px; border-radius: 4px;">
+                Ready (H/M): <strong>{len(ready_high)}</strong></span>
+            <span style="background: rgba(255,255,255,0.15); padding: 6px 12px; border-radius: 4px;">
+                Ready (L): <strong>{len(ready_low)}</strong></span>
+            <span style="background: rgba(255,255,255,0.15); padding: 6px 12px; border-radius: 4px;">
+                In Squeeze: <strong>{len(in_squeeze)}</strong></span>
+        </div>
+    </div>"""
+
+    # --- Sections ---
+    body_sections = ""
+
+    # Section 1: GREEN FIRES
+    if fired_green:
+        sorted_green = sorted(fired_green, key=lambda x: x.get('sunday_score', 0), reverse=True)
+        body_sections += f"""
+        <div style="margin-bottom: 20px;">
+            <h3 style="color: #16a34a; margin: 0 0 8px 0;">GREEN FIRES ({len(fired_green)})</h3>
+            <p style="color: #374151; margin: 0 0 10px 0; font-size: 13px;">Weekly squeeze fired bullish.</p>
+            {_build_fire_table(sorted_green, "green")}
+        </div>"""
+    else:
+        body_sections += """
+        <div style="margin-bottom: 20px;">
+            <h3 style="color: #16a34a; margin: 0 0 8px 0;">GREEN FIRES (0)</h3>
+            <p style="color: #9ca3af; font-size: 13px;">No bullish fires this week.</p>
+        </div>"""
+
+    # Section 2: RED FIRES
+    if fired_red:
+        body_sections += f"""
+        <div style="margin-bottom: 20px;">
+            <h3 style="color: #dc2626; margin: 0 0 8px 0;">RED FIRES ({len(fired_red)})</h3>
+            <p style="color: #374151; margin: 0 0 10px 0; font-size: 13px;">Weekly squeeze fired bearish.</p>
+            {_build_fire_table(fired_red, "red")}
+        </div>"""
+
+    # Section 3: READY TO FIRE — HIGH CONVICTION
+    if ready_high:
+        body_sections += f"""
+        <div style="margin-bottom: 20px;">
+            <h3 style="color: #7c3aed; margin: 0 0 8px 0;">READY TO FIRE — HIGH CONVICTION ({len(ready_high)})</h3>
+            <p style="color: #374151; margin: 0 0 10px 0; font-size: 13px;">HIGH or MID KC compression, 6+ weekly bars. Sorted by duration.</p>
+            {_build_ready_table(ready_high, 15, daily_overlay)}
+        </div>"""
+
+    # Section 4: READY TO FIRE — BUILDING
+    if ready_low:
+        body_sections += f"""
+        <div style="margin-bottom: 20px;">
+            <h3 style="color: #6b7280; margin: 0 0 8px 0;">READY TO FIRE — BUILDING ({len(ready_low)})</h3>
+            <p style="color: #374151; margin: 0 0 10px 0; font-size: 13px;">LOW KC compression, 6+ weekly bars.</p>
+            {_build_ready_table(ready_low, 10, daily_overlay)}
+        </div>"""
+
+    # Section 5: IN SQUEEZE — DEEP COMPRESSION
+    if squeeze_deep:
+        body_sections += f"""
+        <div style="margin-bottom: 20px;">
+            <h3 style="color: #2563eb; margin: 0 0 8px 0;">IN SQUEEZE — DEEP COMPRESSION ({len(squeeze_deep)})</h3>
+            <p style="color: #374151; margin: 0 0 10px 0; font-size: 13px;">HIGH or MID KC, building toward ready (&lt;6 bars).</p>
+            {_build_ready_table(squeeze_deep, 10, daily_overlay)}
+        </div>"""
 
     html = f"""
     <html>
     <body style="font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px;">
-        <div style="background: linear-gradient(135deg, #22c55e 0%, #16a34a 100%); color: white; padding: 20px; border-radius: 8px 8px 0 0;">
-            <h2 style="margin: 0;">🟢 Weekend Squeeze Report</h2>
-            <p style="margin: 5px 0 0 0; opacity: 0.9;">{today}</p>
-        </div>
-
+        {summary_html}
         <div style="background: #f9fafb; padding: 20px; border: 1px solid #e5e5e5; border-top: none;">
-            <p style="margin: 0 0 15px 0; color: #374151;">
-                <strong>{len(fired_green)} GREEN Fire{'' if len(fired_green) == 1 else 's'}</strong> detected -
-                Weekly TTM Squeeze fired bullish on these stocks.
-            </p>
-
-            <table style="width: 100%; border-collapse: collapse; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
-                <thead>
-                    <tr style="background: #374151; color: white;">
-                        <th style="padding: 12px; text-align: left;">Ticker</th>
-                        <th style="padding: 12px; text-align: right;">Price</th>
-                        <th style="padding: 12px; text-align: right;">Week %</th>
-                        <th style="padding: 12px; text-align: center;">Score</th>
-                        <th style="padding: 12px; text-align: right;">Momentum</th>
-                        <th style="padding: 12px; text-align: center;">Bars</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {rows_html}
-                </tbody>
-            </table>
-
-            <div style="margin-top: 20px; padding: 15px; background: #eff6ff; border-radius: 8px; font-size: 13px; color: #1e40af;">
-                <strong>Score Legend:</strong> Higher scores indicate stronger setups based on momentum acceleration,
-                time in squeeze, and weekly performance. Top candidates typically have scores above 70.
-            </div>
+            {body_sections}
         </div>
-
         <div style="background: #f3f4f6; padding: 15px; border-radius: 0 0 8px 8px; border: 1px solid #e5e5e5; border-top: none;">
             <p style="margin: 0; font-size: 12px; color: #6b7280;">
                 Generated by Weekend Squeeze Scanner •
                 <a href="https://github.com/djbrig44/squeezes" style="color: #2563eb;">GitHub</a>
             </p>
+            {f'<p style="margin: 4px 0 0 0; font-size: 11px; color: #9ca3af;">Scanned {scan_stats["scanned"]} of {scan_stats["total"]} symbols successfully.</p>' if scan_stats.get("total") else ""}
         </div>
     </body>
     </html>
@@ -224,24 +340,36 @@ def run_scan_and_email(dry_run: bool = False, tickers: list = None):
 
     # Run scanner
     print("\n🔍 Running squeeze analysis...")
-    fired_green, fired_red, ready_to_fire, in_squeeze = scan_for_squeeze_fires(symbols, timeframe='weekly')
+    fired_green, fired_red, ready_to_fire, in_squeeze, scan_stats = scan_for_squeeze_fires(symbols, timeframe='weekly')
 
     print(f"\n📈 Results:")
     print(f"   🟢 GREEN Fires: {len(fired_green)}")
     print(f"   🔴 RED Fires: {len(fired_red)}")
     print(f"   ⚡ Ready to Fire: {len(ready_to_fire)}")
     print(f"   🔵 In Squeeze: {len(in_squeeze)}")
+    print(f"   📊 Scanned {scan_stats['scanned']} of {scan_stats['total']} symbols successfully")
 
     # Calculate sunday scores for sorting
     for stock in fired_green:
         if 'sunday_score' not in stock:
             stock['sunday_score'] = calculate_sunday_score(stock)
 
-    # Push GREEN fires to Airtable
+    # Push weekly results to Airtable
     push_squeeze_signals_to_airtable(fired_green, fired_red, ready_to_fire, in_squeeze)
 
+    # Fetch daily overlay from Airtable (written by the most recent daily scan)
+    print("\n📊 Fetching daily overlay from Airtable...")
+    daily_overlay = fetch_airtable_records()
+    if daily_overlay:
+        print(f"   Loaded daily data for {len(daily_overlay)} symbols")
+    else:
+        print("   No daily overlay available (Airtable read returned empty)")
+
     # Format and send email
-    subject, html_body = format_squeeze_email(fired_green)
+    subject, html_body = format_squeeze_email(
+        fired_green, fired_red, ready_to_fire, in_squeeze,
+        scan_stats=scan_stats, daily_overlay=daily_overlay,
+    )
     success = send_email(subject, html_body, dry_run=dry_run)
 
     return success

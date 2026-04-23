@@ -1086,6 +1086,7 @@ def scan_for_squeeze_fires(symbols: List[str], max_workers: int = 10, timeframe:
     fired_red = []
     ready_to_fire = []
     in_squeeze = []
+    analyzed_ok = 0
 
     total = len(symbols)
     completed = 0
@@ -1095,20 +1096,22 @@ def scan_for_squeeze_fires(symbols: List[str], max_workers: int = 10, timeframe:
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(analyze_symbol, sym, 500000, timeframe): sym for sym in symbols}
-        
+
         for future in as_completed(futures):
             completed += 1
             symbol = futures[future]
-            
+
             # Progress indicator
             if completed % 50 == 0 or completed == total:
                 print(f"   Progress: {completed}/{total} ({100*completed//total}%)")
-            
+
             try:
                 result = future.result()
                 if result is None:
                     continue
-                
+
+                analyzed_ok += 1
+
                 if result['squeeze_fired']:
                     if result['fire_direction'] == 'GREEN':
                         fired_green.append(result)
@@ -1118,17 +1121,18 @@ def scan_for_squeeze_fires(symbols: List[str], max_workers: int = 10, timeframe:
                     ready_to_fire.append(result)
                 elif result['squeeze_on']:
                     in_squeeze.append(result)
-                    
+
             except Exception as e:
                 continue
-    
+
     # Sort by momentum
     fired_green.sort(key=lambda x: x['momentum'], reverse=True)
     fired_red.sort(key=lambda x: x['momentum'])
     ready_to_fire.sort(key=lambda x: x['bars_in_squeeze'], reverse=True)
     in_squeeze.sort(key=lambda x: x['momentum'], reverse=True)
-    
-    return fired_green, fired_red, ready_to_fire, in_squeeze
+
+    scan_stats = {'total': total, 'scanned': analyzed_ok}
+    return fired_green, fired_red, ready_to_fire, in_squeeze, scan_stats
 
 
 # ============================================================================
@@ -1561,9 +1565,10 @@ def main():
     print(f"{'='*70}")
 
     # Run scanner
-    fired_green, fired_red, ready_to_fire, in_squeeze = scan_for_squeeze_fires(
+    fired_green, fired_red, ready_to_fire, in_squeeze, scan_stats = scan_for_squeeze_fires(
         symbols, max_workers=args.workers, timeframe=timeframe
     )
+    print(f"\n   Scanned {scan_stats['scanned']} of {scan_stats['total']} symbols successfully")
     
     # Print results
     print_results(fired_green, fired_red, ready_to_fire, in_squeeze)
