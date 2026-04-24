@@ -409,7 +409,7 @@ def push_activations_to_airtable(results: Dict[str, Dict],
             "Status": result['status'],
             "Activation Score": result['score'],
             "Activation Signals": "; ".join(result['signals']),
-            "Last Updated": datetime.utcnow().isoformat() + "Z",
+            "Last Updated": date.today().isoformat(),
         }
 
         if result.get('breakout_level') is not None:
