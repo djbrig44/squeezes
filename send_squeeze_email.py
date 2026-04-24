@@ -37,6 +37,7 @@ from weekend_squeeze_scanner import (
     push_squeeze_signals_to_airtable,
     fetch_airtable_records,
 )
+from short_squeeze_watchlist import fetch_watchlist_records
 
 
 def _build_fire_table(stocks: list, color: str, change_key: str = 'weekly_change_pct') -> str:
@@ -141,9 +142,55 @@ def _build_ready_table(stocks: list, limit: int, daily_overlay: dict = None) -> 
     </table>"""
 
 
+def _build_short_squeeze_table(watchlist: list, limit: int = 15) -> str:
+    """Build HTML table for short squeeze watchlist top N."""
+    if not watchlist:
+        return '<p style="color: #9ca3af; font-size: 13px;">No short squeeze data available. Run short_squeeze_watchlist.py first.</p>'
+    display = watchlist[:limit]
+    rows = ""
+    for item in display:
+        f = item.get('fields', {})
+        symbol = f.get('Symbol', '?')
+        score = f.get('Score', 0)
+        grade = f.get('Grade', '?')
+        si_pct = f.get('SI % Float', 0)
+        dtc = f.get('Days to Cover', 0)
+        mspr = f.get('MSPR', 0)
+
+        grade_color = '#22c55e' if grade == 'A' else '#f59e0b' if grade == 'B' else '#6b7280'
+        rows += f"""
+        <tr>
+            <td style="padding: 8px; border-bottom: 1px solid #e5e5e5; font-weight: bold;">{symbol}</td>
+            <td style="padding: 8px; border-bottom: 1px solid #e5e5e5; text-align: center;">{score:.0f}</td>
+            <td style="padding: 8px; border-bottom: 1px solid #e5e5e5; text-align: center; color: {grade_color}; font-weight: bold;">{grade}</td>
+            <td style="padding: 8px; border-bottom: 1px solid #e5e5e5; text-align: right;">{si_pct*100:.1f}%</td>
+            <td style="padding: 8px; border-bottom: 1px solid #e5e5e5; text-align: right;">{dtc:.1f}</td>
+            <td style="padding: 8px; border-bottom: 1px solid #e5e5e5; text-align: right;">{mspr:.1f}</td>
+        </tr>"""
+    overflow = len(watchlist) - limit
+    if overflow > 0:
+        rows += f"""
+        <tr><td colspan="6" style="padding: 8px; text-align: center; color: #6b7280; font-size: 12px;">
+            +{overflow} more in Airtable
+        </td></tr>"""
+    return f"""
+    <table style="width: 100%; border-collapse: collapse; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-bottom: 10px;">
+        <thead><tr style="background: #7c3aed; color: white;">
+            <th style="padding: 8px; text-align: left;">Symbol</th>
+            <th style="padding: 8px; text-align: center;">Score</th>
+            <th style="padding: 8px; text-align: center;">Grade</th>
+            <th style="padding: 8px; text-align: right;">SI%</th>
+            <th style="padding: 8px; text-align: right;">DTC</th>
+            <th style="padding: 8px; text-align: right;">MSPR</th>
+        </tr></thead>
+        <tbody>{rows}</tbody>
+    </table>"""
+
+
 def format_squeeze_email(fired_green: list, fired_red: list = None,
                          ready_to_fire: list = None, in_squeeze: list = None,
-                         scan_stats: dict = None, daily_overlay: dict = None) -> tuple:
+                         scan_stats: dict = None, daily_overlay: dict = None,
+                         short_squeeze_watchlist: list = None) -> tuple:
     """
     Format full weekend squeeze report into an HTML email.
     Returns (subject, html_body).
@@ -153,6 +200,7 @@ def format_squeeze_email(fired_green: list, fired_red: list = None,
     in_squeeze = in_squeeze or []
     scan_stats = scan_stats or {}
     daily_overlay = daily_overlay or {}
+    short_squeeze_watchlist = short_squeeze_watchlist or []
     today = date.today().strftime("%B %d, %Y")
 
     total_fires = len(fired_green) + len(fired_red)
@@ -241,6 +289,15 @@ def format_squeeze_email(fired_green: list, fired_red: list = None,
             <h3 style="color: #2563eb; margin: 0 0 8px 0;">IN SQUEEZE — DEEP COMPRESSION ({len(squeeze_deep)})</h3>
             <p style="color: #374151; margin: 0 0 10px 0; font-size: 13px;">HIGH or MID KC, building toward ready (&lt;6 bars).</p>
             {_build_ready_table(squeeze_deep, 10, daily_overlay)}
+        </div>"""
+
+    # Section 6: SHORT SQUEEZE WATCHLIST
+    if short_squeeze_watchlist:
+        body_sections += f"""
+        <div style="margin-bottom: 20px; border-top: 2px solid #e5e5e5; padding-top: 20px;">
+            <h3 style="color: #7c3aed; margin: 0 0 8px 0;">SHORT SQUEEZE WATCHLIST — Top 15</h3>
+            <p style="color: #374151; margin: 0 0 10px 0; font-size: 13px;">Highest-scoring short squeeze candidates. Updated daily.</p>
+            {_build_short_squeeze_table(short_squeeze_watchlist, 15)}
         </div>"""
 
     html = f"""
@@ -365,10 +422,21 @@ def run_scan_and_email(dry_run: bool = False, tickers: list = None):
     else:
         print("   No daily overlay available (Airtable read returned empty)")
 
+    # Fetch short squeeze watchlist from Airtable
+    print("\n📊 Fetching short squeeze watchlist from Airtable...")
+    ss_records = fetch_watchlist_records()
+    ss_watchlist = sorted(
+        [{'fields': rec['fields']} for rec in ss_records.values()],
+        key=lambda x: x['fields'].get('Score', 0),
+        reverse=True,
+    ) if ss_records else []
+    print(f"   Loaded {len(ss_watchlist)} short squeeze candidates")
+
     # Format and send email
     subject, html_body = format_squeeze_email(
         fired_green, fired_red, ready_to_fire, in_squeeze,
         scan_stats=scan_stats, daily_overlay=daily_overlay,
+        short_squeeze_watchlist=ss_watchlist,
     )
     success = send_email(subject, html_body, dry_run=dry_run)
 
