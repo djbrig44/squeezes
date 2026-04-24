@@ -408,12 +408,19 @@ def analyze_short_candidate(symbol: str, finra_history: List[Dict],
     Fetch all data sources and score a single symbol.
     Returns scored candidate dict or None.
     """
-    # yfinance data (includes volume filter — skip if avg vol < 500K)
+    # yfinance data (includes volume/price/float filters)
     try:
         ticker = yf.Ticker(symbol)
         info = ticker.info
         avg_volume = info.get('averageVolume', 0) or 0
         if avg_volume < 500_000:
+            return None
+        # Filter out micro-caps: lottery tickets, not squeeze trades
+        price = info.get('currentPrice') or info.get('regularMarketPrice', 0) or 0
+        if price < 2.0:
+            return None
+        float_shares = info.get('floatShares', 0) or 0
+        if 0 < float_shares < 5_000_000:
             return None
     except Exception:
         return None
