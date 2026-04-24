@@ -584,10 +584,10 @@ def fetch_watchlist_records() -> Dict[str, dict]:
     return records_map
 
 
-def _at_batch(batch: List[Dict], method: str):
-    """Process an Airtable batch request."""
+def _at_batch(batch: List[Dict], method: str) -> int:
+    """Process an Airtable batch request. Returns count of records confirmed created/updated."""
     if not batch:
-        return
+        return 0
     url = f"https://api.airtable.com/v0/{AT_BASE}/{urllib.parse.quote(AT_TABLE)}"
     payload = {"records": batch}
     try:
@@ -596,9 +596,17 @@ def _at_batch(batch: List[Dict], method: str):
         else:
             resp = session.post(url, headers=AT_HEADERS, json=payload, timeout=30)
         if resp.status_code not in [200, 201]:
-            print(f"   ⚠️  Airtable {method} failed: {resp.status_code} - {resp.text[:200]}")
+            print(f"   ⚠️  Airtable {method} failed: {resp.status_code} - {resp.text[:300]}")
+            return 0
+        # Confirm actual records in response
+        result = resp.json()
+        confirmed = len(result.get('records', []))
+        if confirmed != len(batch):
+            print(f"   ⚠️  Airtable {method}: sent {len(batch)} but only {confirmed} confirmed")
+        return confirmed
     except Exception as e:
         print(f"   ⚠️  Airtable {method} error: {e}")
+        return 0
 
 
 def push_to_airtable(candidates: List[Dict], top_n: int = 100):
@@ -611,6 +619,8 @@ def push_to_airtable(candidates: List[Dict], top_n: int = 100):
 
     existing = fetch_watchlist_records()
     print(f"   Found {len(existing)} existing records")
+    print(f"   Base: {AT_BASE}, Table: {AT_TABLE}")
+    print(f"   API key present: {'yes' if AT_API else 'NO'}")
 
     top = candidates[:top_n]
     update_batch = []
@@ -627,7 +637,7 @@ def push_to_airtable(candidates: List[Dict], top_n: int = 100):
             "Grade": c.get('grade', 'C'),
             "SI % Float": sanitize_number(c.get('si_pct', 0)),
             "Days to Cover": sanitize_number(c.get('days_to_cover', 0)),
-            "Short Vol Trend": sanitize_number(c.get('finra_trend', 0)),
+            "Short Volume Trend": sanitize_number(c.get('finra_trend', 0)),
             "MSPR": sanitize_number(c.get('mspr', 0)),
             "Float Shares": sanitize_number(c.get('float_shares', 0)),
             "SI Change MoM": sanitize_number(c.get('si_change_mom', 0)),
@@ -641,20 +651,16 @@ def push_to_airtable(candidates: List[Dict], top_n: int = 100):
             create_batch.append({"fields": fields})
 
         if len(update_batch) >= AIRTABLE_BATCH_SIZE:
-            _at_batch(update_batch, "PATCH")
-            update_count += len(update_batch)
+            update_count += _at_batch(update_batch, "PATCH")
             update_batch = []
         if len(create_batch) >= AIRTABLE_BATCH_SIZE:
-            _at_batch(create_batch, "POST")
-            create_count += len(create_batch)
+            create_count += _at_batch(create_batch, "POST")
             create_batch = []
 
     if update_batch:
-        _at_batch(update_batch, "PATCH")
-        update_count += len(update_batch)
+        update_count += _at_batch(update_batch, "PATCH")
     if create_batch:
-        _at_batch(create_batch, "POST")
-        create_count += len(create_batch)
+        create_count += _at_batch(create_batch, "POST")
 
     # Delete records no longer in top N
     current_tickers = {c['symbol'].upper() for c in top}
