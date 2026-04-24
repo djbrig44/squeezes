@@ -2,11 +2,10 @@
 """
 Short Squeeze Activation Tracker — Phase 2
 ============================================
-Reads top 50 candidates from Phase 1 Airtable watchlist, detects squeeze
-activations via price breakouts, volume surges, momentum, and pre-market gaps.
-Sends immediate email on new activations and a daily digest.
+DEPRECATED as standalone script. Now invoked as a module via short_squeeze_daily.py.
+The compute_activation_signals() function is the primary export.
 
-Runs daily at 13:00 UTC (pre-market ET), Mon-Fri.
+Previously ran at 13:00 UTC pre-market; now runs post-close via short_squeeze_daily.py.
 
 Airtable Schema Additions (add these to Short_Squeeze_Watchlist before first run):
   - Status            (single select: WATCHING, ACTIVATING, ACTIVATED, PARABOLIC, COOLED, EARNINGS_HOLD)

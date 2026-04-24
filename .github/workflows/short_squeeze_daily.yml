@@ -1,14 +1,14 @@
-name: Short Squeeze Activations
+name: Short Squeeze Daily
 
 on:
   schedule:
-    # Mon-Fri at 13:00 UTC (pre-market ET)
-    - cron: '0 13 * * 1-5'
+    # Mon-Fri at 21:00 UTC (post-close ET)
+    - cron: '0 21 * * 1-5'
 
   workflow_dispatch:
 
 jobs:
-  scan-activations:
+  daily-scan:
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -27,11 +27,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run activation scanner
+      - name: Run daily scanner
         env:
           AT_API: ${{ secrets.AT_API }}
           FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           EMAIL_TO: ${{ secrets.EMAIL_RECIPIENT }}
-        run: python short_squeeze_activations.py
+        run: python short_squeeze_daily.py
