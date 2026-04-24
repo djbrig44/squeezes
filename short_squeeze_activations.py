@@ -175,42 +175,76 @@ def fetch_premarket_data(symbol: str) -> Dict:
 
 def compute_activation_signals(symbol: str, df: pd.DataFrame,
                                 premarket: Dict,
-                                finra_trend: Optional[float] = None) -> Dict:
+                                finra_trend: Optional[float] = None,
+                                prior_breakout_level: Optional[float] = None,
+                                prior_breakout_days: int = 0) -> Dict:
     """
     Compute activation score (0-13) and status from daily bars + pre-market.
 
-    Returns {score, signals, status, breakout_level, gap_pct}.
+    Returns {score, signals, status, breakout_level, breakout_days_held, gap_pct}.
     """
     signals = []
     score = 0
     close = df['Close']
     high = df['High']
+    low = df['Low']
     volume = df['Volume']
     current_price = float(close.iloc[-1])
+    today_high = float(high.iloc[-1])
+    today_low = float(low.iloc[-1])
 
-    # ---- Price breakout (take max within group) ----
+    # Close position in today's range (0.0 = at low, 1.0 = at high)
+    day_range = today_high - today_low
+    close_position = (current_price - today_low) / day_range if day_range > 0 else 0.5
+
+    # ---- Price breakout (validated: close above + range position) ----
     breakout_level = None
-    high_20 = float(high.iloc[-21:-1].max()) if len(df) >= 21 else None
-    high_50 = float(high.iloc[-51:-1].max()) if len(df) >= 51 else None
-    high_52w = float(high.max())
+    breakout_days_held = 0
+
+    # Compute prior N-day highs (excluding today)
+    tiers = []
+    if len(df) >= 21:
+        tiers.append(('20-day', float(high.iloc[-21:-1].max()), 1))
+    if len(df) >= 51:
+        tiers.append(('50-day', float(high.iloc[-51:-1].max()), 2))
+    if len(df) >= 200:
+        tiers.append(('52-week', float(high.iloc[:-1].max()), 3))
+
+    # Sort by tier points descending — check highest first
+    tiers.sort(key=lambda x: x[2], reverse=True)
 
     breakout_pts = 0
-    if high_50 and current_price > high_50:
-        breakout_pts = 2
-        breakout_level = high_50
-        signals.append(f"Broke 50-day high (${high_50:.2f})")
-    elif high_20 and current_price > high_20:
-        breakout_pts = 1
-        breakout_level = high_20
-        signals.append(f"Broke 20-day high (${high_20:.2f})")
+    for tier_name, tier_level, tier_pts in tiers:
+        # a) VALID FRESH BREAKOUT: close above + good range position
+        if current_price > tier_level and close_position >= 0.5:
+            breakout_pts = tier_pts
+            breakout_level = tier_level
+            breakout_days_held = 1
+            signals.append(f"Broke {tier_name} high (${tier_level:.2f}), closed near high")
+            break
+        # c) FAILED BREAKOUT: high touched but close below
+        elif today_high > tier_level and current_price <= tier_level:
+            signals.append(f"Failed breakout: tested {tier_name} ${tier_level:.2f}, closed ${current_price:.2f}")
+            break
 
-    # 52-week high check (use full history available)
-    if len(df) >= 200:
-        high_52w_prior = float(high.iloc[:-1].max())
-        if current_price > high_52w_prior:
-            breakout_pts = 3
-            breakout_level = high_52w_prior
-            signals.append(f"Broke 52-week high (${high_52w_prior:.2f})")
+    # b) VALID CONTINUATION: holding above prior breakout level
+    if breakout_pts == 0 and prior_breakout_level and prior_breakout_days > 0:
+        if current_price > prior_breakout_level and prior_breakout_days < 5:
+            # Still holding — award same points as original breakout tier
+            for tier_name, tier_level, tier_pts in tiers:
+                if abs(tier_level - prior_breakout_level) < 0.01:
+                    breakout_pts = tier_pts
+                    break
+            if breakout_pts == 0:
+                breakout_pts = 1  # default to lowest tier if we can't match
+            breakout_level = prior_breakout_level
+            breakout_days_held = prior_breakout_days + 1
+            signals.append(f"Holding breakout ${prior_breakout_level:.2f} (day {breakout_days_held} of 5)")
+        elif current_price <= prior_breakout_level:
+            # d) BROKE DOWN from prior breakout
+            signals.append(f"Lost breakout ${prior_breakout_level:.2f}")
+            breakout_level = None
+            breakout_days_held = 0
 
     score += breakout_pts
 
@@ -312,6 +346,7 @@ def compute_activation_signals(symbol: str, df: pd.DataFrame,
         'signals': signals,
         'status': status,
         'breakout_level': breakout_level,
+        'breakout_days_held': breakout_days_held,
         'gap_pct': gap_pct,
     }
 
@@ -414,6 +449,8 @@ def push_activations_to_airtable(results: Dict[str, Dict],
 
         if result.get('breakout_level') is not None:
             fields["Breakout Level"] = sanitize_number(result['breakout_level'])
+
+        fields["Breakout Days Held"] = result.get('breakout_days_held', 0)
 
         if result.get('gap_pct') is not None:
             fields["Pre-market %"] = sanitize_number(result['gap_pct'])
@@ -730,8 +767,16 @@ def main():
         # Get FINRA trend from Phase 1 data (stored in Airtable)
         finra_trend = fields.get('Short Volume Trend')
 
+        # Get prior breakout state for continuation tracking
+        prior_bo_level = fields.get('Breakout Level')
+        prior_bo_days = int(fields.get('Breakout Days Held', 0) or 0)
+
         # Compute signals
-        result = compute_activation_signals(sym, df, premarket, finra_trend)
+        result = compute_activation_signals(
+            sym, df, premarket, finra_trend,
+            prior_breakout_level=prior_bo_level,
+            prior_breakout_days=prior_bo_days,
+        )
         result['symbol'] = sym
         result['price'] = float(fields.get('Price', 0))
         result['si_pct'] = fields.get('SI % Float', 0)
