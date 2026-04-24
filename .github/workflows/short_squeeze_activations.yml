@@ -1,0 +1,37 @@
+name: Short Squeeze Activations
+
+on:
+  schedule:
+    # Mon-Fri at 13:00 UTC (pre-market ET)
+    - cron: '0 13 * * 1-5'
+
+  workflow_dispatch:
+
+jobs:
+  scan-activations:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run activation scanner
+        env:
+          AT_API: ${{ secrets.AT_API }}
+          FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          EMAIL_TO: ${{ secrets.EMAIL_RECIPIENT }}
+        run: python short_squeeze_activations.py
