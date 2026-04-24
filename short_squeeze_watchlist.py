@@ -377,6 +377,18 @@ def generate_notes(data: Dict) -> str:
     mspr = data.get('mspr')
     trend = data.get('finra_trend')
     dtc = data.get('days_to_cover', 0)
+    dte = data.get('days_to_earnings')
+    off_high = data.get('off_52w_high_pct')
+    pct_20d = data.get('pct_20d')
+
+    # Earnings proximity — most important context flag, goes first
+    if dte is not None:
+        if dte <= 3:
+            flags.append(f"EARNINGS EVENT ({dte}d) — volatility play")
+        elif dte <= 10:
+            flags.append(f"Pre-earnings ({dte}d) — positioning locked")
+        elif dte <= 30:
+            flags.append(f"Earnings in {dte}d")
 
     if si_pct > 0.20:
         flags.append(f"HIGH SI ({si_pct*100:.1f}%)")
@@ -394,6 +406,13 @@ def generate_notes(data: Dict) -> str:
         flags.append(f"Shorts covering (trend {trend:.2f})")
     if dtc > 8:
         flags.append(f"High DTC ({dtc:.1f} days)")
+
+    # Trend context
+    if off_high is not None:
+        if off_high > -0.05:
+            flags.append("Near 52W high")
+        elif off_high < -0.40:
+            flags.append(f"Off 52W high ({off_high*100:.0f}%)")
 
     return "; ".join(flags) if flags else ""
 
@@ -442,6 +461,40 @@ def analyze_short_candidate(symbol: str, finra_history: List[Dict],
         time.sleep(1.2)  # respect 60/min limit (~50/min to be safe)
         mspr = fetch_finnhub_mspr(symbol)
 
+    # --- Earnings proximity ---
+    days_to_earnings = None
+    try:
+        cal = ticker.calendar
+        if cal is not None and isinstance(cal, dict):
+            earnings_dates = cal.get('Earnings Date', [])
+            today = date.today()
+            for ed in earnings_dates:
+                ed_date = ed.date() if hasattr(ed, 'date') else ed
+                if isinstance(ed_date, date) and ed_date >= today:
+                    days_to_earnings = (ed_date - today).days
+                    break
+    except Exception:
+        pass
+
+    # --- Sector ---
+    sector = info.get('sector') or info.get('category') or 'Unknown'
+
+    # --- Trend context ---
+    pct_20d = None
+    off_52w_high_pct = None
+    try:
+        hist = ticker.history(period='1mo', interval='1d')
+        if hist is not None and len(hist) >= 20:
+            price_20d_ago = float(hist['Close'].iloc[-20])
+            if price_20d_ago > 0:
+                pct_20d = (price - price_20d_ago) / price_20d_ago
+    except Exception:
+        pass
+
+    w52_high = info.get('fiftyTwoWeekHigh', 0) or 0
+    if w52_high > 0 and price > 0:
+        off_52w_high_pct = (price / w52_high) - 1  # negative = below high
+
     # Combine data
     candidate = {
         'symbol': symbol,
@@ -453,6 +506,10 @@ def analyze_short_candidate(symbol: str, finra_history: List[Dict],
         'si_change_mom': yf_data['si_change_mom'],
         'finra_trend': finra_trend,
         'mspr': mspr,
+        'days_to_earnings': days_to_earnings,
+        'sector': sector,
+        'pct_20d': pct_20d,
+        'off_52w_high_pct': off_52w_high_pct,
     }
 
     # Score
@@ -643,7 +700,11 @@ def push_to_airtable(candidates: List[Dict], top_n: int = 100):
             "SI Change MoM": sanitize_number(c.get('si_change_mom', 0)),
             "Last Updated": date.today().isoformat(),
             "Notes": c.get('notes', ''),
+            "Sector": c.get('sector', 'Unknown'),
         }
+        # Only include Days to Earnings if known
+        if c.get('days_to_earnings') is not None:
+            fields["Days to Earnings"] = c['days_to_earnings']
 
         if sym in existing:
             update_batch.append({"id": existing[sym]["id"], "fields": fields})
@@ -699,20 +760,18 @@ def print_results(candidates: List[Dict], scan_stats: Dict, top_n: int = 30):
         return
 
     display = candidates[:top_n]
-    print(f"  {'Rank':<5} {'Symbol':<8} {'Score':>6} {'Grd':>4} {'SI%':>7} {'DTC':>6} {'Trend':>7} {'MSPR':>7} {'Float(M)':>10} {'Price':>8}  Notes")
-    print(f"  {'-'*5} {'-'*8} {'-'*6} {'-'*4} {'-'*7} {'-'*6} {'-'*7} {'-'*7} {'-'*10} {'-'*8}  {'-'*30}")
+    print(f"  {'Rank':<5} {'Symbol':<8} {'Score':>6} {'Grd':>4} {'SI%':>7} {'DTC':>6} {'Earn':>6} {'Sector':<14}  Notes")
+    print(f"  {'-'*5} {'-'*8} {'-'*6} {'-'*4} {'-'*7} {'-'*6} {'-'*6} {'-'*14}  {'-'*40}")
 
     for i, c in enumerate(display, 1):
         si = c.get('si_pct', 0) * 100
         dtc = c.get('days_to_cover', 0)
-        trend = c.get('finra_trend')
-        trend_str = f"{trend:.2f}" if trend else "N/A"
-        mspr = c.get('mspr')
-        mspr_str = f"{mspr:.1f}" if mspr is not None else "N/A"
-        float_m = c.get('float_shares', 0) / 1_000_000
-        notes = c.get('notes', '')[:40]
+        dte = c.get('days_to_earnings')
+        dte_str = f"{dte}d" if dte is not None else "?"
+        sector = (c.get('sector', '?') or '?')[:13]
+        notes = c.get('notes', '')[:50]
 
-        print(f"  {i:<5} {c['symbol']:<8} {c['score']:>6.1f} {c['grade']:>4} {si:>6.1f}% {dtc:>6.1f} {trend_str:>7} {mspr_str:>7} {float_m:>9.1f}M ${c.get('price',0):>7.2f}  {notes}")
+        print(f"  {i:<5} {c['symbol']:<8} {c['score']:>6.1f} {c['grade']:>4} {si:>6.1f}% {dtc:>6.1f} {dte_str:>6} {sector:<14}  {notes}")
 
     if len(candidates) > top_n:
         print(f"\n  ... +{len(candidates) - top_n} more below top {top_n}")
