@@ -114,6 +114,27 @@ def _is_daily_fresh(last_daily_iso) -> bool:
         return False
 
 
+# Weekly scan runs once per week (Saturday). 14 days = at most one missed
+# run; older = genuinely stale weekly classification. Used by:
+#   1. push_daily_squeeze_to_airtable to decide Signal Type "Both Timeframes"
+#      (only true if weekly classification is current, not vestigial weekly
+#      data preserved by the DELETE guard).
+WEEKLY_FRESH_DAYS = 14
+
+
+def _is_weekly_fresh(last_weekly_iso) -> bool:
+    """True if the `Last Weekly Updated` ISO timestamp is within WEEKLY_FRESH_DAYS."""
+    if not last_weekly_iso:
+        return False
+    try:
+        ts = datetime.fromisoformat(str(last_weekly_iso).replace('Z', '+00:00'))
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - ts) <= timedelta(days=WEEKLY_FRESH_DAYS)
+    except (ValueError, TypeError):
+        return False
+
+
 def sanitize_number(val):
     """Sanitize numeric values for Airtable."""
     try:
@@ -238,6 +259,7 @@ def push_squeeze_signals_to_airtable(
     create_batch = []
     update_count = 0
     create_count = 0
+    now_iso = datetime.now(timezone.utc).isoformat()
 
     for stock in all_signals:
         sym = stock['symbol'].upper()
@@ -246,6 +268,15 @@ def push_squeeze_signals_to_airtable(
         if 'sunday_score' not in stock:
             stock['sunday_score'] = calculate_sunday_score(stock)
 
+        # Determine Signal Type: "Both Timeframes" only if existing record has
+        # a fresh daily classification; otherwise "Weekly Only". CREATEs never
+        # have prior daily data so always "Weekly Only".
+        if sym in existing:
+            existing_last_daily = existing[sym]["fields"].get("Last Daily Updated", "")
+            signal_type = "Both Timeframes" if _is_daily_fresh(existing_last_daily) else "Weekly Only"
+        else:
+            signal_type = "Weekly Only"
+
         # Build fields matching Airtable Squeeze Signals table schema
         fields = {
             "Ticker": sym,
@@ -253,6 +284,8 @@ def push_squeeze_signals_to_airtable(
             "Final Signal": stock['signal'],
             "Current Price": sanitize_number(stock.get('current_price', 0)),
             "Last Updated": date.today().isoformat(),
+            "Last Weekly Updated": now_iso,
+            "Signal Type": signal_type,
 
             # Squeeze-specific fields
             "Squeeze Status": stock['squeeze_status'],
@@ -344,6 +377,85 @@ def push_squeeze_signals_to_airtable(
     )
 
 
+def _backfill_signal_types(existing: Dict[str, dict]) -> Dict[str, int]:
+    """One-time backfill: categorize existing records that lack `Signal Type`.
+
+    Idempotent — only touches records with empty/missing Signal Type, so this
+    is safe to run on every daily scan (does nothing once table is fully
+    populated).
+
+    For records with weekly data but no `Last Weekly Updated`, stamps a
+    best-effort timestamp from `Last Updated` (date-only) at noon UTC. This
+    means existing pre-`Last Weekly Updated` records won't all snap to "stale"
+    on first run; they keep whatever recency their `Last Updated` claimed.
+
+    Mutates the in-memory `existing` dict to reflect the new field values so
+    the rest of the daily push loop sees the backfilled state.
+
+    Returns counts dict: {"Weekly Only": N, "Daily Only": M, "Both Timeframes": K}.
+    """
+    if not AT_API:
+        return {}
+
+    backfill_records = []  # list of (sym, rec, update_fields)
+    counts = {"Weekly Only": 0, "Daily Only": 0, "Both Timeframes": 0}
+
+    for sym, rec in existing.items():
+        f = rec.get("fields", {})
+        if f.get("Signal Type"):  # already categorized — idempotent skip
+            continue
+
+        weekly_status = f.get("Squeeze Status", "")
+        has_weekly = weekly_status in ("READY", "IN_SQUEEZE", "FIRED_GREEN", "FIRED_RED")
+        daily_fresh = _is_daily_fresh(f.get("Last Daily Updated", ""))
+
+        if has_weekly and daily_fresh:
+            signal_type = "Both Timeframes"
+        elif has_weekly:
+            signal_type = "Weekly Only"
+        else:
+            signal_type = "Daily Only"
+
+        update_fields = {"Signal Type": signal_type}
+
+        # Stamp best-effort Last Weekly Updated for legacy weekly records
+        # so freshness checks have something to read against.
+        if has_weekly and not f.get("Last Weekly Updated"):
+            last_updated_date = f.get("Last Updated", "")
+            if last_updated_date:
+                try:
+                    proxy_ts = datetime.fromisoformat(
+                        str(last_updated_date) + "T12:00:00+00:00"
+                    )
+                    update_fields["Last Weekly Updated"] = proxy_ts.isoformat()
+                except (ValueError, TypeError):
+                    pass
+
+        backfill_records.append((sym, rec, update_fields))
+        counts[signal_type] += 1
+
+    # Apply via batched PATCH
+    for i in range(0, len(backfill_records), AIRTABLE_BATCH_SIZE):
+        batch_slice = backfill_records[i:i + AIRTABLE_BATCH_SIZE]
+        api_batch = [{"id": r[1]["id"], "fields": r[2]} for r in batch_slice]
+        _process_airtable_batch(api_batch, "PATCH")
+
+    # Mutate in-memory existing so subsequent daily-push logic sees backfilled values
+    for sym, rec, update_fields in backfill_records:
+        rec.setdefault("fields", {}).update(update_fields)
+
+    total = sum(counts.values())
+    if total > 0:
+        print(
+            f"   📋 Backfilled Signal Type for {total} records: "
+            f"Weekly Only: {counts['Weekly Only']}, "
+            f"Daily Only: {counts['Daily Only']}, "
+            f"Both Timeframes: {counts['Both Timeframes']}"
+        )
+
+    return counts
+
+
 def push_daily_squeeze_to_airtable(all_results: List[Dict]):
     """
     Daily overlay: write daily squeeze fields to Airtable.
@@ -354,7 +466,10 @@ def push_daily_squeeze_to_airtable(all_results: List[Dict]):
     from the `Last Daily Updated` timestamp on each record.
 
     Also computes cross-timeframe Alignment by comparing daily results
-    with the weekly Squeeze Status already stored in Airtable.
+    with the weekly Squeeze Status already stored in Airtable, and tags
+    each written record with a Signal Type ("Daily Only" or "Both
+    Timeframes" based on whether the existing record has a fresh weekly
+    classification).
     """
     if not AT_API:
         print("⚠️  AT_API not set - Airtable sync skipped")
@@ -364,6 +479,10 @@ def push_daily_squeeze_to_airtable(all_results: List[Dict]):
 
     existing = fetch_airtable_records()
     print(f"   Found {len(existing)} existing records in Airtable")
+
+    # Idempotent: backfills Signal Type on records that lack it, mutates
+    # `existing` in-place so the loop below sees post-backfill state.
+    _backfill_signal_types(existing)
 
     now_iso = datetime.now(timezone.utc).isoformat()
 
@@ -406,6 +525,14 @@ def push_daily_squeeze_to_airtable(all_results: List[Dict]):
         else:
             alignment = ''
 
+        # Determine Signal Type: "Both Timeframes" only if existing record's
+        # weekly classification is fresh; CREATEs are always "Daily Only".
+        if sym in existing:
+            existing_last_weekly = existing[sym]["fields"].get("Last Weekly Updated", "")
+            signal_type = "Both Timeframes" if _is_weekly_fresh(existing_last_weekly) else "Daily Only"
+        else:
+            signal_type = "Daily Only"
+
         fields = {
             "Daily Squeeze Status": daily_status,
             "Daily Bars": sanitize_number(result.get('bars_in_squeeze', 0)),
@@ -414,6 +541,7 @@ def push_daily_squeeze_to_airtable(all_results: List[Dict]):
             "Alignment": alignment,
             "Last Updated": date.today().isoformat(),
             "Last Daily Updated": now_iso,
+            "Signal Type": signal_type,
         }
 
         if sym in existing:
