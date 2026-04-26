@@ -55,7 +55,7 @@ import urllib.parse
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional, Tuple
 import smtplib
@@ -89,6 +89,29 @@ AT_HEADERS = {
 }
 
 AIRTABLE_BATCH_SIZE = 10
+
+# Freshness window for daily-overlay data. Used by:
+#   1. push_squeeze_signals_to_airtable — protects daily-only records from
+#      the weekly DELETE sweep when their daily classification is recent.
+#   2. send_squeeze_email._format_daily_status — decides whether to render
+#      a record's daily fields or fall back to em-dash.
+# 48h covers the Friday-04:18-UTC daily run → Saturday-17:00-UTC email gap
+# (~37h). Holiday weekends with no Friday run will fall outside this and
+# render as stale, which is acceptable for v1.
+DAILY_FRESH_HOURS = 48
+
+
+def _is_daily_fresh(last_daily_iso) -> bool:
+    """True if the `Last Daily Updated` ISO timestamp is within DAILY_FRESH_HOURS."""
+    if not last_daily_iso:
+        return False
+    try:
+        ts = datetime.fromisoformat(str(last_daily_iso).replace('Z', '+00:00'))
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - ts) <= timedelta(hours=DAILY_FRESH_HOURS)
+    except (ValueError, TypeError):
+        return False
 
 
 def sanitize_number(val):
@@ -287,9 +310,19 @@ def push_squeeze_signals_to_airtable(
         _process_airtable_batch(create_batch, "POST")
         create_count += len(create_batch)
 
-    # Delete stale records (tickers no longer in any squeeze category)
+    # Delete stale records (tickers no longer in any squeeze category).
+    # Guard: preserve records whose daily-only classification is still fresh,
+    # so the weekly sweep doesn't wipe daily-only signals created Mon–Fri.
     current_tickers = {stock['symbol'].upper() for stock in all_signals}
-    stale = [rec for ticker, rec in existing.items() if ticker not in current_tickers]
+    stale = []
+    preserved_daily_count = 0
+    for ticker, rec in existing.items():
+        if ticker in current_tickers:
+            continue
+        if _is_daily_fresh(rec["fields"].get("Last Daily Updated", "")):
+            preserved_daily_count += 1
+            continue
+        stale.append(rec)
     delete_count = 0
 
     for i in range(0, len(stale), AIRTABLE_BATCH_SIZE):
@@ -305,14 +338,20 @@ def push_squeeze_signals_to_airtable(
         except Exception as e:
             print(f"   ⚠️  Airtable DELETE error: {e}")
 
-    print(f"✅ Airtable sync complete: {update_count} updates, {create_count} creates, {delete_count} stale deleted")
+    print(
+        f"✅ Airtable sync complete: {update_count} updates, {create_count} creates, "
+        f"{delete_count} stale deleted, {preserved_daily_count} daily-only preserved"
+    )
 
 
 def push_daily_squeeze_to_airtable(all_results: List[Dict]):
     """
-    Daily overlay: update existing Airtable records with daily squeeze fields.
-    Only updates records that already exist (from the weekly scan).
-    Never creates or deletes records.
+    Daily overlay: write daily squeeze fields to Airtable.
+
+    UPDATEs existing records and CREATEs records for daily-only signals
+    (symbols not yet in Airtable from the weekly scan). Records absent
+    from this scan are left untouched — the email reader infers staleness
+    from the `Last Daily Updated` timestamp on each record.
 
     Also computes cross-timeframe Alignment by comparing daily results
     with the weekly Squeeze Status already stored in Airtable.
@@ -326,17 +365,16 @@ def push_daily_squeeze_to_airtable(all_results: List[Dict]):
     existing = fetch_airtable_records()
     print(f"   Found {len(existing)} existing records in Airtable")
 
+    now_iso = datetime.now(timezone.utc).isoformat()
+
     update_batch = []
+    create_batch = []
     update_count = 0
-    skip_count = 0
+    create_count = 0
     daily_fired_stocks = []  # Stocks with 🔥 DAILY FIRED alignment
 
     for result in all_results:
         sym = result['symbol'].upper()
-
-        if sym not in existing:
-            skip_count += 1
-            continue
 
         # Determine daily squeeze status
         if result.get('squeeze_fired'):
@@ -349,7 +387,7 @@ def push_daily_squeeze_to_airtable(all_results: List[Dict]):
             daily_status = 'NONE'
 
         # Cross-timeframe alignment: compare daily results with weekly status
-        weekly_status = existing[sym]["fields"].get("Squeeze Status", "")
+        weekly_status = existing.get(sym, {}).get("fields", {}).get("Squeeze Status", "")
         weekly_coiled = weekly_status in ('READY', 'IN_SQUEEZE')
 
         if daily_status == 'FIRED_GREEN' and weekly_coiled:
@@ -375,49 +413,42 @@ def push_daily_squeeze_to_airtable(all_results: List[Dict]):
             "Daily Accel": sanitize_number(result.get('momentum_accel', 0)),
             "Alignment": alignment,
             "Last Updated": date.today().isoformat(),
+            "Last Daily Updated": now_iso,
         }
 
-        update_batch.append({
-            "id": existing[sym]["id"],
-            "fields": fields
-        })
+        if sym in existing:
+            update_batch.append({
+                "id": existing[sym]["id"],
+                "fields": fields,
+            })
+        else:
+            # Daily-only signal — create new record so the classification persists.
+            create_fields = dict(fields)
+            create_fields["Ticker"] = sym
+            create_batch.append({"fields": create_fields})
 
         if len(update_batch) >= AIRTABLE_BATCH_SIZE:
             _process_airtable_batch(update_batch, "PATCH")
             update_count += len(update_batch)
             update_batch = []
 
+        if len(create_batch) >= AIRTABLE_BATCH_SIZE:
+            _process_airtable_batch(create_batch, "POST")
+            create_count += len(create_batch)
+            create_batch = []
+
     if update_batch:
         _process_airtable_batch(update_batch, "PATCH")
         update_count += len(update_batch)
 
-    # Set remaining Airtable records (not in any daily category) to NONE
-    updated_tickers = {r['symbol'].upper() for r in all_results if r['symbol'].upper() in existing}
-    none_batch = []
-    none_count = 0
-    for ticker, rec in existing.items():
-        if ticker not in updated_tickers:
-            none_batch.append({
-                "id": rec["id"],
-                "fields": {
-                    "Daily Squeeze Status": "NONE",
-                    "Daily Bars": 0,
-                    "Daily Momentum": 0,
-                    "Daily Accel": 0,
-                    "Alignment": "",
-                    "Last Updated": date.today().isoformat(),
-                }
-            })
-            if len(none_batch) >= AIRTABLE_BATCH_SIZE:
-                _process_airtable_batch(none_batch, "PATCH")
-                none_count += len(none_batch)
-                none_batch = []
+    if create_batch:
+        _process_airtable_batch(create_batch, "POST")
+        create_count += len(create_batch)
 
-    if none_batch:
-        _process_airtable_batch(none_batch, "PATCH")
-        none_count += len(none_batch)
-
-    print(f"✅ Daily Airtable sync: {update_count} updated, {none_count} set to NONE, {skip_count} skipped (not in table)")
+    print(
+        f"✅ Daily Airtable sync: {update_count} updated, {create_count} created "
+        f"(records not in this scan left untouched; staleness inferred at read-time)"
+    )
 
     # Send daily alert email if any DAILY FIRED stocks found
     if daily_fired_stocks:

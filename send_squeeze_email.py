@@ -26,7 +26,7 @@ import smtplib
 import argparse
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from datetime import datetime, date
+from datetime import datetime, date, timedelta, timezone
 
 # Import the scanner - adjust path as needed
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -36,6 +36,8 @@ from weekend_squeeze_scanner import (
     calculate_sunday_score,
     push_squeeze_signals_to_airtable,
     fetch_airtable_records,
+    DAILY_FRESH_HOURS,
+    _is_daily_fresh,
 )
 from short_squeeze_watchlist import fetch_watchlist_records
 
@@ -76,12 +78,21 @@ def _build_fire_table(stocks: list, color: str, change_key: str = 'weekly_change
 
 
 def _format_daily_status(daily_fields: dict) -> str:
-    """Format daily overlay data into a compact status string for the email."""
+    """Format daily overlay data into a compact status string for the email.
+
+    Distinguishes:
+      FIRED / READY / IN_SQ  → coloured badge (data is fresh and signalled)
+      Fresh NONE             → "Not in Sq" (analyzed today, no signal)
+      Stale or missing       → em-dash
+    """
     if not daily_fields:
         return '<span style="color: #9ca3af;">&mdash;</span>'
+
+    fresh = _is_daily_fresh(daily_fields.get('Last Daily Updated', ''))
     status = daily_fields.get('Daily Squeeze Status', '')
-    bars = int(daily_fields.get('Daily Bars', 0))
+    bars = int(daily_fields.get('Daily Bars', 0) or 0)
     alignment = daily_fields.get('Alignment', '')
+
     if alignment and 'DAILY FIRED' in alignment:
         return '<span style="color: #22c55e; font-weight: bold;">FIRED</span>'
     if status == 'FIRED_GREEN':
@@ -92,7 +103,39 @@ def _format_daily_status(daily_fields: dict) -> str:
         return f'<span style="color: #f59e0b;">Ready ({bars}b)</span>'
     if status == 'IN_SQUEEZE':
         return f'<span style="color: #3b82f6;">In Sq ({bars}b)</span>'
+    if status == 'NONE' and fresh:
+        return '<span style="color: #9ca3af; font-size: 11px;">Not in Sq</span>'
     return '<span style="color: #9ca3af;">&mdash;</span>'
+
+
+def _build_daily_overlay_footer(daily_overlay: dict) -> str:
+    """Footer line summarizing how many daily classifications and when they ran."""
+    if not daily_overlay:
+        return ''
+    classifications = 0
+    latest_ts = None
+    for rec in daily_overlay.values():
+        fields = rec.get('fields', {})
+        if fields.get('Daily Squeeze Status') in ('FIRED_GREEN', 'FIRED_RED', 'READY', 'IN_SQUEEZE'):
+            classifications += 1
+        last_daily = fields.get('Last Daily Updated', '')
+        if last_daily:
+            try:
+                ts = datetime.fromisoformat(str(last_daily).replace('Z', '+00:00'))
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                if latest_ts is None or ts > latest_ts:
+                    latest_ts = ts
+            except (ValueError, TypeError):
+                pass
+    if latest_ts is None:
+        return ''
+    ts_str = latest_ts.strftime('%a %b %d %H:%M UTC')
+    return (
+        f'<p style="margin: 4px 0 0 0; font-size: 11px; color: #9ca3af;">'
+        f'Daily overlay: {classifications} classifications from {ts_str} scan.'
+        f'</p>'
+    )
 
 
 def _build_ready_table(stocks: list, limit: int, daily_overlay: dict = None) -> str:
@@ -313,6 +356,7 @@ def format_squeeze_email(fired_green: list, fired_red: list = None,
                 <a href="https://github.com/djbrig44/squeezes" style="color: #2563eb;">GitHub</a>
             </p>
             {f'<p style="margin: 4px 0 0 0; font-size: 11px; color: #9ca3af;">Scanned {scan_stats["scanned"]} of {scan_stats["total"]} symbols successfully.</p>' if scan_stats.get("total") else ""}
+            {_build_daily_overlay_footer(daily_overlay)}
         </div>
     </body>
     </html>
