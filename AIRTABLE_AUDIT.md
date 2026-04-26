@@ -3,6 +3,33 @@
 **Status:** Planning artifact. Not yet executed.
 **Estimated effort:** 1–2 hours, single focused session.
 **Created:** 2026-04-26 after the comprehensive weekend-email fix.
+**Last schema update:** 2026-04-26 — added `Signal Type` and `Last Weekly Updated` fields (commit `da734ad`).
+
+## Squeeze Signals schema (current)
+
+Fields used by the audit and downstream systems:
+
+| Field | Type | Stamped by | Notes |
+|---|---|---|---|
+| `Ticker` | Single line text | Both writers | Primary key (uppercase) |
+| `Squeeze Status` | Single select | Weekly writer | READY / IN_SQUEEZE / FIRED_GREEN / FIRED_RED |
+| `Daily Squeeze Status` | Single select | Daily writer | Same options + NONE |
+| `Last Updated` | Date | Both writers | Date only — proxy for "record touched today" |
+| `Last Weekly Updated` | DateTime | Weekly writer | UTC ISO timestamp; freshness window 14 days |
+| `Last Daily Updated` | DateTime | Daily writer | UTC ISO timestamp; freshness window 48 hours |
+| `Signal Type` | Single select | Both writers | Weekly Only / Daily Only / Both Timeframes |
+
+## Symmetric-freshness pattern (design principle)
+
+The fix in `da734ad` introduced **symmetric freshness checking** as a counterpart to the cross-table DELETE guard from commit `9204f23` (Bug D). Both apply when one writer's data could be misleading without context from the other writer.
+
+Pattern shape:
+- Each writer stamps its own `Last X Updated` timestamp on every write.
+- Each writer reads the *other's* timestamp via a parallel `_is_X_fresh()` helper before making category claims about combined state.
+- The freshness window is calibrated to the writer's cadence (48h for daily-cadence, 14d for weekly-cadence).
+- Constants and helpers live in the *writer* module (`weekend_squeeze_scanner.py`); consumers import them.
+
+Apply this pattern any time a value derived from multiple write paths needs to mean something at read-time. Without it, "both fields populated" silently degrades to "either field has been populated at some point in history" — which is the same shape of silent corruption pattern P3 catalogues at the write side.
 
 ---
 
@@ -118,7 +145,7 @@ Listed by priority. Higher priority = more frequently run, more user-visible, or
 
 | Priority | File | Notes |
 |---|---|---|
-| **P0** | `weekend_squeeze_scanner.py` | Just fixed — re-verify no regressions (P2/P3/P4 already addressed; check P1/P5/P6/P8 in `push_squeeze_signals_to_airtable`) |
+| **P0** | `weekend_squeeze_scanner.py` | Recently fixed (`9204f23` + `da734ad`) — re-verify no regressions. P2/P3/P4 addressed in `9204f23`; P9 (stale-as-current) addressed via symmetric-freshness pattern in `da734ad`. Still check P1/P5/P6/P8 in both push functions and the new `_backfill_signal_types`. |
 | **P0** | `short_squeeze_watchlist.py` | Phase 1; partially audited after the field-name incident, do full pass |
 | **P0** | `short_squeeze_daily.py` | Phase 2/3 push — recently modified, has multiple write paths |
 | **P1** | `short_squeeze_activations.py` | Saw activation-related Airtable writes; never deeply audited |
