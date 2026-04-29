@@ -121,6 +121,13 @@ def _is_daily_fresh(last_daily_iso) -> bool:
 #      data preserved by the DELETE guard).
 WEEKLY_FRESH_DAYS = 14
 
+# Minimum |momentum| for a fire to qualify. Filters borderline cases where the
+# squeeze technically ended on a bar with near-zero momentum (e.g., EVEX at
+# +0.03 — a flat signal that is not a meaningful directional break). Calibrated
+# from a 26-week, 1,153-symbol backtest where this threshold improved 5-week
+# post-fire win rates from 53% → 65% (GREEN) and 61% → 72% (RED).
+MIN_FIRE_MOMENTUM = 1.0
+
 
 def _is_weekly_fresh(last_weekly_iso) -> bool:
     """True if the `Last Weekly Updated` ISO timestamp is within WEEKLY_FRESH_DAYS."""
@@ -933,8 +940,11 @@ def calculate_weekly_squeeze(df: pd.DataFrame,
     # MEANINGFUL squeeze = Mid + High only (ignore Low like TOS)
     meaningful_squeeze = squeeze_high | squeeze_mid
 
-    # Legacy squeeze_on for compatibility (any squeeze)
-    squeeze_on = in_low_squeeze
+    # Fire trigger uses the MEANINGFUL tier (1.0× + 1.2× ATR), matching ToS
+    # TTMSqzPro semantics. The widest 1.5× tier is too loose to mark fires —
+    # using it produced <1% catch rate across 10 weeks of production runs.
+    # See SCANNER_FIX_PLAN.md and commit message for the diagnostic chain.
+    squeeze_on = meaningful_squeeze
     
     # --- TRUE TTM SQUEEZE MOMENTUM ---
     # Midline = average of (Donchian midline + SMA)
@@ -959,15 +969,15 @@ def calculate_weekly_squeeze(df: pd.DataFrame,
     
     momentum = deviation.rolling(mom_length).apply(linreg_value, raw=True)
     
-    # Current values — use standard squeeze (1.5x KC) for fire detection to match TOS
+    # Current values from the meaningful-tier (mid+high) squeeze series.
     current_squeeze = squeeze_on.iloc[-1] if len(squeeze_on) > 0 else False
     prev_squeeze = squeeze_on.iloc[-2] if len(squeeze_on) > 1 else False
     current_meaningful = meaningful_squeeze.iloc[-1] if len(meaningful_squeeze) > 0 else False
     prev_meaningful = meaningful_squeeze.iloc[-2] if len(meaningful_squeeze) > 1 else False
     current_mom = momentum.iloc[-1] if len(momentum) > 0 else 0
     prev_mom = momentum.iloc[-2] if len(momentum) > 1 else 0
+    mom_accel = current_mom - prev_mom if not pd.isna(prev_mom) else 0
 
-    # Count bars in standard squeeze (1.5x KC — matches TOS TTM Squeeze)
     # When squeeze just ended (fired), current bar is NOT in squeeze,
     # so start counting from the previous bar (iloc[-2]) which was last in squeeze.
     # When still in squeeze, start counting from current bar (iloc[-1]).
@@ -980,29 +990,24 @@ def calculate_weekly_squeeze(df: pd.DataFrame,
         else:
             break
 
-    # Squeeze fired = was in squeeze (1.5x KC), now NOT in squeeze
-    # AND had at least 6 bars in squeeze
-    squeeze_fired = squeeze_just_ended and bars_in_squeeze >= 6
-
-    # Freshness check: only report fires where the meaningful (mid+high)
-    # squeeze ended within the last bar. If only the wide/low squeeze was
-    # lingering after the real compression ended, it's a stale signal.
-    if squeeze_fired:
-        bars_since_meaningful = 0
-        for i in range(1, min(50, len(meaningful_squeeze))):
-            if meaningful_squeeze.iloc[-i]:
-                break
-            bars_since_meaningful += 1
-        if bars_since_meaningful > 1:
-            squeeze_fired = False  # Stale — meaningful squeeze ended 2+ bars ago
+    # A clean fire requires four conditions:
+    #   1. Meaningful squeeze just ended (prev=True, current=False)
+    #   2. At least 6 bars of accumulated compression
+    #   3. |momentum| >= MIN_FIRE_MOMENTUM (filters near-zero noise)
+    #   4. Momentum and acceleration share sign (rising for GREEN, falling for RED)
+    # Condition 4 catches late-cycle squeezes where momentum has already peaked
+    # at the fire bar — a structurally different setup from a fresh break.
+    squeeze_fired = (
+        squeeze_just_ended
+        and bars_in_squeeze >= 6
+        and abs(current_mom) >= MIN_FIRE_MOMENTUM
+        and (current_mom * mom_accel) > 0
+    )
 
     # Fire direction (only if squeeze actually fired)
     fire_direction = None
     if squeeze_fired:
         fire_direction = 'GREEN' if current_mom > 0 else 'RED'
-
-    # Momentum acceleration
-    mom_accel = current_mom - prev_mom if not pd.isna(prev_mom) else 0
 
     # Ready = currently in squeeze with 6+ bars
     ready = current_squeeze and bars_in_squeeze >= 6
