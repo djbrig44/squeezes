@@ -119,6 +119,25 @@ Counter increments before async/queued write finishes; failures don't decrement.
 ### P8 — Missing CREATE-vs-UPDATE branching
 Single code path always PATCHes (assumes exists) or always POSTs (assumes new) without checking. Half the operations fail with 404 or duplicate record errors that get swallowed.
 
+### P10 — Classifier producing systematic false negatives ("all-clear is the bug")
+
+Detection logic that should fire on real-world events instead reports nothing, silently. The all-clear is itself the bug, but it's indistinguishable from a quiet market without external validation.
+
+```python
+# BAD — fire trigger wired to the wrong tier; suppressed by a band-aid filter.
+squeeze_on = in_low_squeeze   # widest tier (1.5×), too loose for fires
+squeeze_fired = squeeze_just_ended and bars_in_squeeze >= 6
+if squeeze_fired:
+    if bars_since_meaningful > 1:
+        squeeze_fired = False  # band-aid hides the wrong-tier choice
+```
+
+**Origin:** `weekend_squeeze_scanner.py` fire-trigger wired to `in_low_squeeze` (commit `edb9d74`, Feb 2026 regression). 0 GREEN fires across 10 weeks of production runs when actual count should have been 50–150. Fixed in commit `57cac1b` (2026-04-28).
+
+**Detection:** any classifier whose output is "absence of signal" — compare against a ground-truth source (chart inspection, alternative implementation, historical backtest) on a known-positive case. If ground truth says signal exists and code says no signal, investigate.
+
+**Mitigation:** classifiers should produce auditable intermediate values per bar (BB/KC tier classifications, momentum, acceleration) so the difference between "no signal" and "signal but suppressed" is observable. The NVDA debug output that surfaced this bug is a model — visible per-bar tier states made the suppression instantly diagnosable.
+
 ### P9 — Stale-as-current (read-side adjacent)
 Read paths present stored Airtable data as current without validating freshness via timestamp fields. Adjacent to write-path bugs but worth catching in the same audit pass.
 ```python
