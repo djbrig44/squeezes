@@ -177,7 +177,7 @@ Listed by priority. Higher priority = more frequently run, more user-visible, or
 |---|---|---|
 | **P1** | `sec_processor.py` | Filing alerts to Airtable |
 | **P1** | `dedupe_records.py` | DELETEs records — high blast radius if logic is wrong (P4 risk) |
-| **Blocked** | `portfolio_iv_updater.py` | **Audit blocked** — no scheduled workflow exists in `sec-filing-processor-git/.github/workflows/` (confirmed 2026-04-26: only `afterhours_momentum`, `dedupe_records`, `premarket_momentum`, `sec_filing_processor` are scheduled). File is orphaned. Recommend file a `delete-or-relocate` work item BEFORE auditing. If it's still wanted, decide where it should run, then add to audit P1. |
+| **P2** | `portfolio_iv_updater.py` | **Location corrected 2026-04-30** — script lives at `~/Python Crypto Dashboard/portfolio_iv_updater.py`, not `sec-filing-processor-git/`. Per Crypto Dashboard CLAUDE.md, it runs via `daily_run.yml` 21:00 UTC weekdays as `portfolio_refresh` step. Operational. Audit when in scope: writes IV_30d, Expected Daily Move, Distance to Stop (in EDMs) to Portfolio table. Uses pyairtable (different client than the squeezes scripts) — checklist coverage may need adapting. |
 | **P2** | `filing_router.py` | Routing logic — may not write to Airtable at all, scan first |
 | **P2** | `backfill_categories.py`, `backfill_filing_family.py` | Backfill scripts — bulk writes, P1/P3 risk |
 
