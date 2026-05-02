@@ -1058,65 +1058,103 @@ def calculate_weekly_squeeze(df: pd.DataFrame,
 # DATA FETCHING
 # ============================================================================
 
+import random
+import threading
+import time
+
+# Retry telemetry for yfinance fetches. Helps gauge how often the retry layer
+# is recovering from transient Yahoo failures vs how often a stock is genuinely
+# missing. Reset per scan via reset_retry_stats(); printed in scan summary.
+_retry_lock = threading.Lock()
+_retry_stats = {
+    "total_calls": 0,
+    "first_attempt_success": 0,
+    "retry_recoveries": 0,
+    "final_failures": 0,
+}
+
+
+def _retry_stats_inc(key: str) -> None:
+    with _retry_lock:
+        _retry_stats[key] += 1
+
+
+def reset_retry_stats() -> None:
+    with _retry_lock:
+        for k in _retry_stats:
+            _retry_stats[k] = 0
+
+
+def get_retry_stats() -> Dict[str, int]:
+    with _retry_lock:
+        return dict(_retry_stats)
+
+
+def _fetch_history_with_retry(
+    symbol: str,
+    start: datetime,
+    end: datetime,
+    interval: str = '1d',
+    max_attempts: int = 3,
+) -> Optional[pd.DataFrame]:
+    """Fetch yfinance history with exponential backoff on failure.
+
+    Treats exceptions AND empty results as retryable (transient Yahoo
+    rate-limiting often returns empty rather than raising). Backoff:
+    3s, 6s with small jitter. Telemetry tracked in module-level counter.
+
+    max_attempts=3 chosen empirically: testing max_attempts=2 dropped
+    coverage from 62% to 41% across the universe (Yahoo response behavior
+    varies run-to-run more than first-try telemetry suggests — earlier
+    retried calls appear to warm session state for subsequent first-tries).
+    """
+    _retry_stats_inc("total_calls")
+    for attempt in range(1, max_attempts + 1):
+        try:
+            ticker = yf.Ticker(symbol)
+            df = ticker.history(start=start, end=end, interval=interval)
+            if df is not None and not df.empty:
+                _retry_stats_inc("first_attempt_success" if attempt == 1 else "retry_recoveries")
+                return df
+        except Exception:
+            pass
+        if attempt < max_attempts:
+            time.sleep(3 * (2 ** (attempt - 1)) + random.uniform(0, 1.5))
+    _retry_stats_inc("final_failures")
+    return None
+
+
 def fetch_daily_data(symbol: str, days: int = 120) -> Optional[pd.DataFrame]:
-    """
-    Fetch daily data for daily squeeze analysis.
-
-    Args:
-        symbol: Stock ticker
-        days: Number of days of history (default 120 for ~6 months)
-    """
-    try:
-        ticker = yf.Ticker(symbol)
-        end_date = datetime.now()
-        start_date = end_date - timedelta(days=days + 30)
-
-        df = ticker.history(start=start_date, end=end_date, interval='1d')
-
-        if df is None or df.empty:
-            return None
-
-        if len(df) < 20:
-            return None
-
-        return df
-    except Exception as e:
+    """Fetch daily data for daily squeeze analysis."""
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=days + 30)
+    df = _fetch_history_with_retry(symbol, start_date, end_date, '1d')
+    if df is None or len(df) < 20:
         return None
+    return df
 
 
 def fetch_weekly_data(symbol: str, weeks: int = 52) -> Optional[pd.DataFrame]:
-    """
-    Fetch daily data and resample to weekly for most current data.
+    """Fetch daily data and resample to weekly for most current data.
 
     Native yfinance weekly data often lags by a week. By fetching daily
     and resampling to Friday close, we get the most recent complete week.
     """
-    try:
-        ticker = yf.Ticker(symbol)
-        end_date = datetime.now()
-        start_date = end_date - timedelta(days=weeks * 7 + 30)
-
-        # Fetch daily data
-        df = ticker.history(start=start_date, end=end_date, interval='1d')
-
-        if df is None or df.empty:
-            return None
-
-        # Resample to weekly (Friday close)
-        df = df.resample('W-FRI').agg({
-            'Open': 'first',
-            'High': 'max',
-            'Low': 'min',
-            'Close': 'last',
-            'Volume': 'sum'
-        }).dropna()
-
-        if len(df) < 20:
-            return None
-
-        return df
-    except Exception as e:
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=weeks * 7 + 30)
+    df = _fetch_history_with_retry(symbol, start_date, end_date, '1d')
+    if df is None:
         return None
+    df = df.resample('W-FRI').agg({
+        'Open': 'first',
+        'High': 'max',
+        'Low': 'min',
+        'Close': 'last',
+        'Volume': 'sum'
+    }).dropna()
+    if len(df) < 20:
+        return None
+    return df
 
 
 def analyze_symbol(symbol: str, min_avg_volume: int = 500000, timeframe: str = 'weekly') -> Optional[Dict]:
@@ -1127,26 +1165,25 @@ def analyze_symbol(symbol: str, min_avg_volume: int = 500000, timeframe: str = '
         min_avg_volume: Minimum average daily volume (default 500k)
         timeframe: 'weekly' or 'daily'
     """
-    import time
-    import random
-
-    # Small random delay to avoid Yahoo rate limiting (0.05-0.15 seconds)
+    # Small random delay to smooth requests across the worker pool
     time.sleep(random.uniform(0.05, 0.15))
 
     try:
-        ticker = yf.Ticker(symbol)
-        info = ticker.info
-        avg_volume = info.get('averageVolume', 0) or 0
-
-        if avg_volume < min_avg_volume:
-            return None  # Skip low-volume stocks
-
-        # Fetch daily data (single API call — reuse ticker object)
+        # Fetch history first — load-bearing for both volume filter AND
+        # squeeze classification. This sidesteps the structural Yahoo info
+        # bottleneck (~52% of universe gets persistent info refusal).
         end_date = datetime.now()
         start_date = end_date - timedelta(days=52 * 7 + 30)
-        daily_df = ticker.history(start=start_date, end=end_date, interval='1d')
+        daily_df = _fetch_history_with_retry(symbol, start_date, end_date, '1d')
 
-        if daily_df is None or daily_df.empty or len(daily_df) < 20:
+        if daily_df is None or len(daily_df) < 20:
+            return None
+
+        # Volume filter from actual bars — more accurate than Yahoo's cached
+        # `averageVolume` field, and works for the ~52% of symbols Yahoo
+        # refuses info for.
+        avg_volume = float(daily_df['Volume'].tail(20).mean())
+        if avg_volume < min_avg_volume:
             return None
 
         # Build analysis dataframe
@@ -1165,11 +1202,22 @@ def analyze_symbol(symbol: str, min_avg_volume: int = 500000, timeframe: str = '
         if squeeze_data is None:
             return None
 
+        # Best-effort info + calendar fetch for decorative fields stored on the
+        # Airtable record (sector, 52w pct, short interest, days-to-earnings).
+        # Failures don't block scanning — fields fall back to neutral defaults.
+        info: Dict = {}
+        ticker = None
+        try:
+            ticker = yf.Ticker(symbol)
+            fetched = ticker.info
+            if isinstance(fetched, dict):
+                info = fetched
+        except Exception:
+            ticker = None
+
         # Store avg volume and timeframe for reference
         squeeze_data['avg_volume'] = avg_volume
         squeeze_data['timeframe'] = timeframe
-
-        # Add symbol, sector, and price info
         squeeze_data['symbol'] = symbol
         squeeze_data['sector'] = info.get('sector') or info.get('category') or 'Unknown'
         change_label = 'daily_change_pct' if timeframe == 'daily' else 'weekly_change_pct'
@@ -1178,7 +1226,7 @@ def analyze_symbol(symbol: str, min_avg_volume: int = 500000, timeframe: str = '
             squeeze_data['prev_close'] * 100
         ) if squeeze_data['prev_close'] > 0 else 0
 
-        # === Extra metrics (computed from daily data + info) ===
+        # === Extra metrics (computed from daily data — no info dependency) ===
         current_price = squeeze_data['current_price']
 
         # Daily ATR (14-period)
@@ -1194,36 +1242,34 @@ def analyze_symbol(symbol: str, min_avg_volume: int = 500000, timeframe: str = '
         squeeze_data['target_price'] = current_price + (3 * daily_atr)
 
         # Relative volume (latest day vs 20-day avg)
-        avg_vol_20 = float(daily_df['Volume'].tail(20).mean())
         latest_vol = float(daily_df['Volume'].iloc[-1])
-        squeeze_data['relative_volume'] = latest_vol / avg_vol_20 if avg_vol_20 > 0 else 0
+        squeeze_data['relative_volume'] = latest_vol / avg_volume if avg_volume > 0 else 0
 
-        # 52-week high/low distance (as decimals: -0.10 = 10% below high)
+        # === Decorative info-derived fields (best-effort; defaults if missing) ===
         w52_high = info.get('fiftyTwoWeekHigh', 0) or 0
         w52_low = info.get('fiftyTwoWeekLow', 0) or 0
         squeeze_data['high_52w_pct'] = (current_price / w52_high - 1) if w52_high > 0 else 0
         squeeze_data['low_52w_pct'] = (current_price / w52_low - 1) if w52_low > 0 else 0
-
-        # Short interest (yfinance returns as decimal, e.g. 0.05 = 5%)
         squeeze_data['short_pct'] = info.get('shortPercentOfFloat', 0) or 0
 
-        # Days to earnings
+        # Days to earnings — only attempt if info fetch succeeded
         squeeze_data['days_to_earnings'] = None
-        try:
-            cal = ticker.calendar
-            if cal is not None and isinstance(cal, dict):
-                earnings_dates = cal.get('Earnings Date', [])
-                today = datetime.now().date()
-                for ed in earnings_dates:
-                    ed_date = ed.date() if hasattr(ed, 'date') else ed
-                    if isinstance(ed_date, date) and ed_date >= today:
-                        squeeze_data['days_to_earnings'] = (ed_date - today).days
-                        break
-        except Exception:
-            pass
+        if ticker is not None:
+            try:
+                cal = ticker.calendar
+                if cal is not None and isinstance(cal, dict):
+                    earnings_dates = cal.get('Earnings Date', [])
+                    today = datetime.now().date()
+                    for ed in earnings_dates:
+                        ed_date = ed.date() if hasattr(ed, 'date') else ed
+                        if isinstance(ed_date, date) and ed_date >= today:
+                            squeeze_data['days_to_earnings'] = (ed_date - today).days
+                            break
+            except Exception:
+                pass
 
         return squeeze_data
-    except Exception as e:
+    except Exception:
         return None
 
 
@@ -1294,6 +1340,20 @@ def scan_for_squeeze_fires(symbols: List[str], max_workers: int = 10, timeframe:
     fired_red.sort(key=lambda x: x['momentum'])
     ready_to_fire.sort(key=lambda x: x['bars_in_squeeze'], reverse=True)
     in_squeeze.sort(key=lambda x: x['momentum'], reverse=True)
+
+    # History-fetch retry telemetry — visible in production logs.
+    # Info fetch is best-effort and not telemetered (failures are tolerated).
+    rs = get_retry_stats()
+    if rs["total_calls"] > 0:
+        hist_rec = rs["retry_recoveries"]
+        hist_total = max(rs["total_calls"], 1)
+        print(
+            f"\n📊 Yahoo history retry telemetry: "
+            f"{rs['total_calls']} fetches, "
+            f"{rs['first_attempt_success']} first-try, "
+            f"{hist_rec} recovered ({hist_rec / hist_total * 100:.1f}% rescue), "
+            f"{rs['final_failures']} final-fail"
+        )
 
     scan_stats = {'total': total, 'scanned': analyzed_ok}
     return fired_green, fired_red, ready_to_fire, in_squeeze, scan_stats
