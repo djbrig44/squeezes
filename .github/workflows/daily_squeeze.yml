@@ -2,8 +2,8 @@ name: Daily Squeeze Scan
 
 on:
   schedule:
-    # Mon-Fri after market close: 5pm PT = Tue-Sat 01:00 UTC
-    - cron: '0 1 * * 2-6'
+    # Mon-Fri after market close: 4pm PDT / 3pm PST = Mon-Fri 23:00 UTC
+    - cron: '0 23 * * 1-5'
 
   # Allow manual trigger
   workflow_dispatch:
