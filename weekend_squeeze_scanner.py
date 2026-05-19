@@ -549,7 +549,24 @@ def push_daily_squeeze_to_airtable(all_results: List[Dict]):
             "Last Updated": date.today().isoformat(),
             "Last Daily Updated": now_iso,
             "Signal Type": signal_type,
+
+            # Timeframe-agnostic context — computed in analyze_symbol() regardless
+            # of timeframe, written on every daily run so creates fill them in
+            # and existing records stay fresh M-F (was: stale Saturday snapshot).
+            "Sector": result.get('sector', 'Unknown'),
+            "Current Price": sanitize_number(result.get('current_price', 0)),
+            "ATR %": sanitize_number(result.get('atr_pct', 0)),
+            "Stop Loss": sanitize_number(result.get('stop_loss', 0)),
+            "Target Price": sanitize_number(result.get('target_price', 0)),
+            "Relative Volume": sanitize_number(result.get('relative_volume', 0)),
+            "52-week High %": sanitize_number(result.get('high_52w_pct', 0)),
+            "52-week Low %": sanitize_number(result.get('low_52w_pct', 0)),
+            "Short Interest %": sanitize_number(result.get('short_pct', 0)),
         }
+
+        # Days To Earnings: omit when None (avoid 0 = "earnings today")
+        if result.get('days_to_earnings') is not None:
+            fields["Days To Earnings"] = result['days_to_earnings']
 
         if sym in existing:
             update_batch.append({
