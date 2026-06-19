@@ -3,3 +3,7 @@ numpy>=1.24.0
 yfinance>=0.2.30
 requests>=2.31.0
 lxml>=4.9.0
+# Forward harness + engine deps
+scipy>=1.11.0
+matplotlib>=3.7.0
+fredapi>=0.5.0
