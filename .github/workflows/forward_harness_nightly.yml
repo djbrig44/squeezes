@@ -40,8 +40,10 @@ jobs:
       - name: Run nightly forward harness (both engines)
         env:
           AT_API: ${{ secrets.AT_API }}
-          # Engine writes Trading Signals table; AT_TABLE is hardcoded in the engine
-          # FRED_API_KEY left unset on purpose — engine degrades gracefully
+          # FRED_API_KEY required — EconomicModule constructor calls Fred(api_key)
+          # which raises ValueError if unset. The "Economic data disabled" warning
+          # at line 7813 is dead code (never reachable; constructor blows up first).
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
           # Matplotlib needs headless backend on the runner
           MPLBACKEND: Agg
         run: python nightly_forward_harness.py

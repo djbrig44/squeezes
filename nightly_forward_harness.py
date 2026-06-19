@@ -157,29 +157,45 @@ def main():
     today = datetime.now(LA).strftime("%Y-%m-%d")
     print(f"\n=== Forward harness — {today} ===")
 
+    # Track engine failures and propagate to workflow exit code. Sentinel rows are
+    # only written when an engine succeeded but produced zero signals (legitimate
+    # no-signal night). On engine crash, we skip the sentinel and exit non-zero —
+    # workflow goes RED, the log isn't polluted with rows that misrepresent failure.
+    exit_code = 0
+
     # ---- BUNDLE (live) ----
     bundle_pin = md5_short(REPO / BUNDLE_ENGINE)
     print(f"\n[BUNDLE]  pin (live md5): {bundle_pin}")
     _check_bundle_drift(bundle_pin)   # warns if md5 drifted off test-start pin
     rc_b = run_engine(BUNDLE_ENGINE, BUNDLE_WORKDIR, BUNDLE_DUMP, no_airtable=False)
-    bundle_signals = read_dump(BUNDLE_DUMP) if rc_b == 0 else []
-    n_b = append_signals(str(FWD_LOG), engine="bundle", signals=bundle_signals,
-                         signal_date=today, engine_version=bundle_pin)
-    print(f"   appended {n_b} signal rows")
+    if rc_b == 0:
+        bundle_signals = read_dump(BUNDLE_DUMP)
+        n_b = append_signals(str(FWD_LOG), engine="bundle", signals=bundle_signals,
+                             signal_date=today, engine_version=bundle_pin)
+        print(f"   appended {n_b} signal rows")
+    else:
+        print(f"   ⚠️ BUNDLE engine FAILED (exit {rc_b}) — no log write; workflow will exit red",
+              file=sys.stderr)
+        exit_code = max(exit_code, rc_b)
 
     # ---- BASELINE (paper) ----
     print(f"\n[BASELINE] pin (frozen): {BASELINE_PIN_FROZEN}")
     if not _check_baseline_freeze():
         print("   skipping baseline paper run due to freeze break")
-        return 1
+        return max(exit_code, 1)
     rc_x = run_engine(BASELINE_ENGINE, BASELINE_WORKDIR, BASELINE_DUMP, no_airtable=True)
-    baseline_signals = read_dump(BASELINE_DUMP) if rc_x == 0 else []
-    n_x = append_signals(str(FWD_LOG), engine="baseline", signals=baseline_signals,
-                         signal_date=today, engine_version=BASELINE_PIN_FROZEN)
-    print(f"   appended {n_x} signal rows")
+    if rc_x == 0:
+        baseline_signals = read_dump(BASELINE_DUMP)
+        n_x = append_signals(str(FWD_LOG), engine="baseline", signals=baseline_signals,
+                             signal_date=today, engine_version=BASELINE_PIN_FROZEN)
+        print(f"   appended {n_x} signal rows")
+    else:
+        print(f"   ⚠️ BASELINE engine FAILED (exit {rc_x}) — no log write; workflow will exit red",
+              file=sys.stderr)
+        exit_code = max(exit_code, rc_x)
 
     print(f"\n[{datetime.now(LA).strftime('%H:%M:%S')}] forward log updated: {FWD_LOG}")
-    return 0
+    return exit_code
 
 
 if __name__ == "__main__":
