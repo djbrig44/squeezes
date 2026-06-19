@@ -40,7 +40,7 @@ from zoneinfo import ZoneInfo
 # Append-signals lives in the adapter module.
 from forward_signal_adapter import append_signals
 
-REPO = Path("/Users/djbrig/squeezes")
+REPO = Path(__file__).resolve().parent  # harness lives at repo root; works local + Actions
 FWD_LOG = REPO / "forward_signals.csv"
 LA = ZoneInfo("America/Los_Angeles")
 
