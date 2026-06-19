@@ -1,0 +1,71 @@
+name: Forward Harness Nightly
+
+on:
+  schedule:
+    # Mon-Fri post-EOD: 15 min after the existing daily_squeeze (which runs 23:00 UTC).
+    # 23:15 UTC = 4:15pm PDT / 3:15pm PST — bundle runs after market close + data settle.
+    - cron: '15 23 * * 1-5'
+
+  # Manual trigger for testing or re-run
+  workflow_dispatch:
+
+permissions:
+  # Required to commit forward_signals.csv back to the repo
+  contents: write
+
+jobs:
+  nightly-harness:
+    runs-on: ubuntu-latest
+    # Don't fight other workflows for runners; let this take its time
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository (full history needed for commit-back)
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          # The default GITHUB_TOKEN can push to the repo with contents:write above
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run nightly forward harness (both engines)
+        env:
+          AT_API: ${{ secrets.AT_API }}
+          # Engine writes Trading Signals table; AT_TABLE is hardcoded in the engine
+          # FRED_API_KEY left unset on purpose — engine degrades gracefully
+          # Matplotlib needs headless backend on the runner
+          MPLBACKEND: Agg
+        run: python nightly_forward_harness.py
+
+      - name: Commit forward_signals.csv if changed
+        run: |
+          if [[ -n "$(git status --porcelain forward_signals.csv 2>/dev/null)" ]]; then
+            git config user.name  "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add forward_signals.csv
+            git commit -m "Forward log: $(date -u +%Y-%m-%d) accumulation [skip ci]"
+            git push
+            echo "✓ forward_signals.csv updated and pushed"
+          else
+            echo "⚠ forward_signals.csv unchanged — neither engine wrote signals (off-hours? sentinel? both engines failed?)"
+          fi
+
+      - name: Surface raw signal dumps for debugging (artifact, 14 day retention)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: raw-signal-dumps-${{ github.run_id }}
+          path: |
+            nightly_runs/bundle/raw_signals_dump.json
+            nightly_runs/baseline/raw_signals_dump.json
+          retention-days: 14
+          if-no-files-found: warn

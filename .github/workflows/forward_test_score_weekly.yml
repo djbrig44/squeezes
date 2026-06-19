@@ -1,0 +1,45 @@
+name: Forward Test Score Weekly
+
+on:
+  schedule:
+    # Saturday 13:00 UTC = 6am PDT / 5am PST Saturday morning.
+    # Gives Friday night's nightly harness time to land + commit forward_signals.csv.
+    - cron: '0 13 * * 6'
+
+  # Manual trigger for ad-hoc evaluation
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  weekly-score:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository (gets latest forward_signals.csv)
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run forward test scorer (locked pre-registered rule)
+        run: |
+          # --as-of is dynamic (today's date in UTC); decision parameters are LOCKED.
+          # Do not adjust --confirm-sample/bar or --revert-sample/bar after first run —
+          # that would invalidate the pre-registration and bias the test.
+          python forward_test_score.py \
+            --signals forward_signals.csv \
+            --as-of "$(date -u +%Y-%m-%d)" \
+            --confirm-sample 162 \
+            --confirm-bar 4.0 \
+            --revert-sample 81 \
+            --revert-bar -2.5
