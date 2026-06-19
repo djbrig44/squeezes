@@ -124,7 +124,12 @@ def _check_bundle_drift(current_pin):
 
 
 def run_engine(engine_file, workdir, dump_path, no_airtable):
-    """Invoke engine in --mode live; set FWD_DUMP_PATH so the tap writes per-engine."""
+    """Invoke engine in --mode live; set FWD_DUMP_PATH so the tap writes per-engine.
+
+    Surfaces an Airtable-related tail of the engine's stdout so the workflow log
+    shows whether the engine actually wrote/skipped Airtable. Filters out the
+    massive scoring spam the engine prints; keeps Airtable + signal-count lines.
+    """
     _ensure_workdir(workdir)
     env = os.environ.copy()
     env["FWD_DUMP_PATH"] = str(dump_path)
@@ -133,10 +138,25 @@ def run_engine(engine_file, workdir, dump_path, no_airtable):
         cmd.append("--no-airtable")
     print(f"[{datetime.now(LA).strftime('%H:%M:%S')}] {engine_file} → cwd={workdir.name}, "
           f"dump={dump_path.name}, no_airtable={no_airtable}")
+    print(f"   cmd: {' '.join(cmd)}")
     proc = subprocess.run(cmd, cwd=workdir, env=env, capture_output=True, text=True)
+
+    # Surface Airtable-relevant lines from stdout (was previously discarded on success).
+    # Keep this filter narrow — full stdout is multi-megabyte and would drown the log.
+    keywords = ("Airtable", "airtable", "skip_airtable", "skip-airtable",
+                "--no-airtable", "skipped", "📡", "✅", "❌", "Live execution",
+                "Pushing", "synced", "wrote", "Backtest run", "Code Version")
+    lines = [l for l in (proc.stdout or "").splitlines()
+             if any(k in l for k in keywords)]
+    if lines:
+        print(f"   --- engine stdout (Airtable-relevant lines) ---")
+        for l in lines[-30:]:  # last 30 matches; should cover the Airtable summary
+            print(f"     {l}")
+        print(f"   --- end engine stdout tail ---")
+
     if proc.returncode != 0:
         print(f"   ⚠️ exit {proc.returncode} — stderr tail:", file=sys.stderr)
-        print(proc.stderr[-2000:], file=sys.stderr)
+        print((proc.stderr or "")[-2000:], file=sys.stderr)
     return proc.returncode
 
 
