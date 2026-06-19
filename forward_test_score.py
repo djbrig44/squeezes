@@ -223,6 +223,14 @@ def run(signals_path, as_of,
     sig = sig[sig["ticker"].notna()
               & (sig["ticker"].astype(str).str.strip() != "")].copy()
 
+    # Dedupe by (signal_date, engine, ticker) keeping LAST occurrence. Append-only log
+    # is chronological, so last = most recent run. This makes the scorer robust to
+    # manual re-triggers / retried nights that would otherwise inflate n on both sides
+    # and smear the edge toward whatever that day did. Belt-and-suspenders alongside
+    # post-hoc CSV cleanup. One day cannot carry > 1× weight.
+    sig = sig.drop_duplicates(subset=["signal_date", "engine", "ticker"],
+                              keep="last").reset_index(drop=True)
+
     sig = classify_divergence(sig)
 
     if prices is None:  # production path
