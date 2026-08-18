@@ -699,6 +699,11 @@ def push_to_airtable(candidates: List[Dict], top_n: int = 100):
             "Float Shares": sanitize_number(c.get('float_shares', 0)),
             "SI Change MoM": sanitize_number(c.get('si_change_mom', 0)),
             "Last Updated": date.today().isoformat(),
+            # Per-writer stamp. "Last Updated" is written by BOTH this job and
+            # short_squeeze_daily.py, so it always reads "today" and cannot tell
+            # you which half of the row actually refreshed. This one moves only
+            # when the Price/Score/MSPR/SI half does.
+            "Price Updated": date.today().isoformat(),
             "Notes": c.get('notes', ''),
             "Sector": c.get('sector', 'Unknown'),
         }

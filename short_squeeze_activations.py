@@ -444,6 +444,10 @@ def push_activations_to_airtable(results: Dict[str, Dict],
             "Activation Score": result['score'],
             "Activation Signals": "; ".join(result['signals']),
             "Last Updated": date.today().isoformat(),
+            # Per-writer stamp -- see the note in short_squeeze_watchlist.py.
+            # This moves only when Status/Activation/Exhaustion refreshes, which
+            # is computed on LIVE bars (fetch_daily_bars), not the Price field.
+            "Status Updated": date.today().isoformat(),
         }
 
         if result.get('breakout_level') is not None:
